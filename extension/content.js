@@ -285,9 +285,9 @@
     const limit=Core.accountLimitReason?.(diagnostic)||(['quota','credits','spending','rate','limited'].includes(diagnostic.reason)?diagnostic.reason:'');
     return limit?'account.'+limit:({auth:'oauth.catalogAuth',access:'oauth.catalogAccess',server:'oauth.catalogServer',network:'oauth.catalogNetwork',timeout:'oauth.catalogTimeout',response:'oauth.catalogResponse'})[diagnostic.reason]||'oauth.catalogConnected';
   }
-  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||['oauth.usageError','error.apiUsage','status.rateLimited'].includes(key));}
+  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||['oauth.usageError','error.apiUsage','status.rateLimited','claude.budgetReached','claude.requestRejected'].includes(key));}
   function renderUsageLinks(target,provider) {
-    const links=[['account.viewUsage','https://grok.com/dashboard/usage'],...(provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])].map(([key,url])=>[t(key),url]);
+    const links=(provider==='claude'?[['claude.billingLink','https://platform.claude.com/settings/billing']]:[['account.viewUsage','https://grok.com/dashboard/usage'],...(provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])]).map(([key,url])=>[t(key),url]);
     const signature=JSON.stringify(links);if(target.usageSignature===signature)return;target.usageSignature=signature;
     target.replaceChildren();
     for(const [label,url] of links){
@@ -295,7 +295,7 @@
     }
   }
   async function openSettings() {
-    const message={type:'OPEN_SETTINGS',focus:settings.provider==='oauth'?'oauth':settings.provider==='build'?'build':'api-key'};
+    const message={type:'OPEN_SETTINGS',focus:settings.provider==='oauth'?'oauth':settings.provider==='build'?'build':settings.provider==='claude'?'claude':'api-key'};
     // Settings can add or replace a Key. Restore the feed subscription so its
     // updated CONFIG can reach a tab that previously had no usable credential.
     if(workerSleeping)connect();
@@ -322,7 +322,7 @@
     railHistory.setAttribute('aria-label',t('common.history'));railHistory.title=t('common.history');
     railCollapse.setAttribute('aria-label',t('common.collapse'));railCollapse.title=t('tooltip.collapse');
     railExpand.setAttribute('aria-label',t('common.expand'));railExpand.title=t('tooltip.expand');
-    railHeader.title=settings.provider==='oauth'?t('oauth.modeLabel',{count:settings.apiConcurrency}):settings.provider==='build'?t('popup.buildLabel',{transport:settings.buildTransport.toUpperCase()}):t('tooltip.apiMode',{count:settings.apiConcurrency});
+    railHeader.title=settings.provider==='oauth'?t('oauth.modeLabel',{count:settings.apiConcurrency}):settings.provider==='claude'?t('claude.modeLabel',{count:settings.apiConcurrency}):settings.provider==='build'?t('popup.buildLabel',{transport:settings.buildTransport.toUpperCase()}):t('tooltip.apiMode',{count:settings.apiConcurrency});
   }
   function syncUILanguage() {
     const observed=UI.normalizeLanguage(document.documentElement.getAttribute('lang') || navigator.language || 'en');
@@ -414,7 +414,17 @@
     entry.ui.analysisDivider.hidden=!entry.answerSplit||!(verifying||entry.verificationRendered?.trim());
     entry.ui.box.setAttribute('aria-busy',String(active||entry.status==='retry-wait'));
   }
+  function claudeErrorKey(code,failure) {
+    if(code==='CLAUDE_BUDGET')return 'claude.budgetReached';
+    if(code!=='API_ERROR')return '';
+    const http=failure?.httpStatus,provider=Core.apiFailureProviderCode(failure?.providerCode);
+    if(http===401||['authentication_error','invalid_api_key'].includes(provider))return 'claude.keyRejected';
+    if(http>=500||failure?.code==='SERVER')return 'claude.serverError';
+    if(http===400||http===402||http===403||http===404||['invalid_request_error','billing_error','permission_error','not_found_error'].includes(provider))return 'claude.requestRejected';
+    return '';
+  }
   function errorKey(code,failure) {
+    if(settings.provider==='claude'||code==='CLAUDE_BUDGET'){const key=claudeErrorKey(code,failure);if(key)return key;}
     if(code==='MODEL_UNSUPPORTED')return 'error.modelUnsupported';
     if(code==='MEDIA_INPUT_LIMIT')return 'error.mediaLimit';
     if(code==='API_IMAGE_INPUT')return 'error.apiImageInput';
@@ -450,7 +460,7 @@
   }
   function requestSnapshot(entry,requestId,task='analysis') {
     return {requestId,task,entry,postSnapshot:entry.post,apiIdentity:Core.apiPostIdentity(entry.post,task==='comments'?undefined:settings),path:pageRouteKey(),provider:settings.provider,
-      language:settings.language,apiModel:settings.provider==='oauth'?settings.oauthModel:settings.provider==='build'?settings.buildModel:settings.apiModel,
+      language:settings.language,apiModel:settings.provider==='claude'?Core.providerModel(settings):settings.provider==='oauth'?settings.oauthModel:settings.provider==='build'?settings.buildModel:settings.apiModel,
       verifyPrompt:settings.verifyPrompt,commentsPrompt:settings.commentsPrompt};
   }
   function savedAnswerIdentity(entry) {
@@ -585,7 +595,9 @@
       hasConfig=true;awaitingConfig=true;workerSleeping=false;reconnectFailures=0;
       if(message.triggerGuideCompleted===true){triggerGuideCompleted=true;if(message.triggerGuidePersisted!==false)triggerGuideCompletionPending=false;hideTriggerGuide();}
       clearTimeout(handshakeTimer);handshakeTimer=undefined;
-      const nextSettings=Core.normalizeSettings(message.settings),previousOptions={...settings},nextOptions={...nextSettings};
+      // Claude without opt-in automatic checks behaves like Custom mode with
+      // only the post button enabled. Saved trigger choices are unchanged.
+      const nextSettings=(Core.effectiveTriggerSettings||(value=>value))(Core.normalizeSettings(message.settings)),previousOptions={...settings},nextOptions={...nextSettings};
       // Editing prompts affects new requests. Interface language only relabels
       // controls; accepted jobs and visible answers retain their task snapshot.
       // An archived explanation draft can survive upgrades, but never changes
@@ -602,7 +614,7 @@
       const accountChanged=credentialIdentity!==nextCredentialIdentity;
       const allChanged=accountChanged||JSON.stringify(previousOptions)!==JSON.stringify(nextOptions);
       const presentationOrPromptsOnlyChanged=!allChanged&&JSON.stringify(settings)!==JSON.stringify(nextSettings);
-      const identity=value=>JSON.stringify([value.provider,value.apiModel,value.apiReasoningEffort,value.oauthModel,value.oauthReasoningEffort,value.buildModel,value.buildReasoningEffort,value.buildTransport,value.buildPort,value.language,value.webSearch,value.xSearch,value.apiVerification,value.explanationMode]);
+      const identity=value=>JSON.stringify([value.provider,value.claudeModel,value.claudeEffort,value.claudeMaxSearches,value.apiModel,value.apiReasoningEffort,value.oauthModel,value.oauthReasoningEffort,value.buildModel,value.buildReasoningEffort,value.buildTransport,value.buildPort,value.language,value.webSearch,value.xSearch,value.apiVerification,value.explanationMode]);
       const previous=identity(settings),dwellChanged=settings.dwellMs!==nextSettings.dwellMs;
       const triggersChanged=JSON.stringify([settings.triggerMode,settings.customTriggers,settings.enabled])!==JSON.stringify([nextSettings.triggerMode,nextSettings.customTriggers,nextSettings.enabled]);
       const wasReady=providerReady;

@@ -53,8 +53,9 @@
 
   function create(options = {}) {
     const oauth = options.purpose === 'oauth-refresh';
-    const record = oauth ? 'oauth-refresh-aes-gcm-v1' : options.purpose === 'build-connection' ? 'build-connection-aes-gcm-v1' : RECORD;
-    const context = oauth ? 'SuperX OAuth refresh token storage/v1 AES-256-GCM' : options.purpose === 'build-connection' ? 'SuperX local connection storage/v1 AES-256-GCM' : CONTEXT;
+    const claude = options.purpose === 'claude-api-key';
+    const record = oauth ? 'oauth-refresh-aes-gcm-v1' : options.purpose === 'build-connection' ? 'build-connection-aes-gcm-v1' : claude ? 'claude-api-key-aes-gcm-v1' : RECORD;
+    const context = oauth ? 'SuperX OAuth refresh token storage/v1 AES-256-GCM' : options.purpose === 'build-connection' ? 'SuperX local connection storage/v1 AES-256-GCM' : claude ? 'SuperX Claude API Key storage/v1 AES-256-GCM' : CONTEXT;
     const maxLength = oauth ? 16384 : MAX_KEY_LENGTH, maxCiphertextBytes = maxLength * 3 + 16;
     const validEnvelope = value => isEnvelope(value, maxCiphertextBytes);
     const idb = options.indexedDB || root.indexedDB;
@@ -220,5 +221,6 @@
   const api = Object.freeze({ ...create(), create });
   root.SuperXKeyStore = api;
   root.SuperXBuildConnectionStore = create({purpose:'build-connection'});
+  root.SuperXClaudeKeyStore = create({purpose:'claude-api-key'});
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

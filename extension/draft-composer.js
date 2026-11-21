@@ -798,7 +798,7 @@
       setText(ui.statusLabel,state.errorKey?text(state.errorKey):active?text(state.status==='running'?'status.verifying':'status.queued'):state.status==='done'?summary:text('draft.privacy'));
       ui.usageHelp.hidden=!(state.errorKey&&(state.errorKey.startsWith('account.')||state.errorKey.startsWith('oauth.catalog')||['oauth.usageError','error.apiUsage','status.rateLimited'].includes(state.errorKey)));
       if(!ui.usageHelp.hidden){
-        const links=[['account.viewUsage','https://grok.com/dashboard/usage'],...(config.provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])].map(([key,url])=>[text(key),url]);
+        const links=(config.provider==='claude'?[['claude.billingLink','https://platform.claude.com/settings/billing']]:[['account.viewUsage','https://grok.com/dashboard/usage'],...(config.provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])]).map(([key,url])=>[text(key),url]);
         const signature=JSON.stringify(links);
         if(ui.usageHelp.usageSignature!==signature){
           ui.usageHelp.usageSignature=signature;ui.usageHelp.replaceChildren();

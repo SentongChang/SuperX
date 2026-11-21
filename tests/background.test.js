@@ -14,6 +14,7 @@ const setup = require('../extension/build-setup.js');
 const BUILD_SECRET='superx_'+'e'.repeat(64);
 const buildStoreProfiles=new WeakMap();
 const source = fs.readFileSync(path.join(__dirname, '../extension/background.js'), 'utf8');
+const claudeTransport = require('../extension/claude-transport.js');
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const keyStoreProfiles = new WeakMap();
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -80,6 +81,11 @@ function createBackground(options = {}) {
     async clear(){buildStoreCalls.push('clear');if(options.buildClear)await options.buildClear();buildState.key=null;}
   };
   buildStoreProfiles.set(local.data,buildState);
+  const claudeStoreState=options.claudeStoreState||{key:null};
+  const claudeStore={envelopePresent:value=>value!==undefined,isEnvelope:value=>Boolean(value&&value.fixture==='claude'),
+    async seal(raw){claudeStoreState.key=raw;return {fixture:'claude'};},
+    async open(value){if(!claudeStore.isEnvelope(value)||!claudeStoreState.key)throw Error('Unavailable Claude Key');return claudeStoreState.key;},
+    async clear(){claudeStoreState.key=null;}};
   const cacheFixture=Object.hasOwn(options,'cache')?{cache:options.cache}:{};
   const session = storage(options.session === null ? cacheFixture : { apiKey: 'session-secret', ...cacheFixture, ...options.session }, { get: options.sessionGet, set: options.sessionSet, remove: options.sessionRemove });
   const apiCalls = [], commentCalls = [], buildCalls=[], buildCommentCalls=[], buildStatusCalls=[], runtimeMessages = [], createdTabs = [], removedTabs = [], tabMessages = [], deadlines = [], createdWindows = [], removedWindows = [];
@@ -145,7 +151,7 @@ function createBackground(options = {}) {
   let now = options.now ?? 1800000000000;
   class ClockDate extends Date { static now() { return now; } }
   const context = vm.createContext({
-    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
+    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXClaudeKeyStore:claudeStore,SuperXClaude:claudeTransport,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
     navigator: Object.hasOwn(options, 'navigator') ? options.navigator : { language: 'en-US' },
     SuperXBuild:{publicError:buildProvider.publicError,async close(){if(options.buildClose)await options.buildClose();},async status(input){buildStatusCalls.push(clone(input));return options.buildStatus?options.buildStatus(input):{connected:true,installed:true,available:true,authenticated:true,version:'1.0.60'};},
       async run(post,settings,callbacks){const call={post,settings,...callbacks};buildCalls.push(call);return options.buildRun?options.buildRun(call,harness):{text:'Checked '+post.id,provider:'build',searched:true,verificationStatus:'completed',model:'grok-4.7',usage:{total_tokens:17}};},
@@ -4106,4 +4112,44 @@ test('custom-trigger guide ignores untrusted completion messages and unrelated a
   await lookupCachedPost(bg,port,'no-implicit-guide-cache');await tick();
   assert.equal((await bg.message({type:'GET_CONFIG'})).triggerGuideCompleted,false);
   assert.equal(writes.length,0);
+});
+
+test('Claude: saved Key enables manual checks, records estimated cost and stops at the cycle budget',async()=>{
+  const ticks=claudeTransport.USD_TICKS;
+  const bg=createBackground({session:null,settings:{provider:'claude',claudeBudgetUsd:1,claudeCycleDay:15},
+    apiRun:async call=>({text:'Claude finding '+call.post.id,sources:[],provider:'claude',searched:true,verificationStatus:'completed',model:'claude-haiku-5-5',usage:{total_tokens:10,cost_in_usd_ticks:0.6*ticks}})});
+  await bg.ready();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'));
+  assert.equal(port.messages.findLast(value=>value.type==='CONFIG').ready,false);
+  const invalid=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'xai-not-a-claude-key'});
+  assert.equal(invalid.ok,false);assert.equal(invalid.errorKey,'claude.keyInvalid');
+  const saved=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-api03-background-fixture'});
+  assert.equal(saved.ok,true);assert.equal(saved.configured,true);assert.equal(saved.usd,0);assert.equal(saved.budgetUsd,1);
+  assert.deepEqual(bg.local.data.claudeApiKeyEncrypted,{fixture:'claude'});
+  assert.ok(!JSON.stringify(bg.local.data).includes('sk-ant-api03-background-fixture'));
+  await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready&&value.claudeStatus?.configured));
+  // Automatic triggers stay closed for Claude; the post button still works.
+  assert.equal((await analyze(bg,port,'claude-auto',100,{triggerKind:'automatic'})).code,'TRIGGER_DISABLED');
+  const first=await analyze(bg,port,'claude-manual',101,{triggerKind:'manual'});
+  assert.equal(first.type,'RESULT');assert.equal(bg.apiCalls.length,1);
+  assert.equal(bg.apiCalls[0].key,'sk-ant-api03-background-fixture');assert.equal(bg.apiCalls[0].settings.provider,'claude');
+  let status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.ok(Math.abs(status.usd-0.6)<1e-9);assert.equal(status.requests,1);assert.equal(status.exhausted,false);
+  await analyze(bg,port,'claude-manual-2',102,{triggerKind:'manual'});
+  status=await bg.message({type:'GET_CLAUDE_STATUS'});assert.equal(status.exhausted,true);assert.equal(status.requests,2);
+  const blocked=await analyze(bg,port,'claude-blocked',103,{triggerKind:'manual'});
+  assert.equal(blocked.type,'ERROR');assert.equal(blocked.code,'CLAUDE_BUDGET');assert.equal(bg.apiCalls.length,2);
+  const reset=await bg.message({type:'RESET_CLAUDE_SPEND'});assert.equal(reset.usd,0);assert.equal(reset.exhausted,false);
+  const cleared=await bg.message({type:'CLEAR_CLAUDE_KEY'});assert.equal(cleared.configured,false);
+  assert.equal(bg.local.data.claudeApiKeyEncrypted,undefined);
+});
+
+test('Claude: an encrypted Key is restored after a worker restart',async()=>{
+  const claudeStoreState={key:'sk-ant-api03-restored-fixture'};
+  const bg=createBackground({session:null,claudeStoreState,local:{settings:{provider:'claude'},claudeApiKeyEncrypted:{fixture:'claude'},claudeSpend:{cycleStart:0,usd:5,requests:3}}});
+  await bg.ready();
+  const status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.equal(status.configured,true);
+  // Spend from an older cycle does not count against the current one.
+  assert.equal(status.usd,0);
 });

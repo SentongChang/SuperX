@@ -1,9 +1,10 @@
 /* SuperX: credentials and provider calls stay in the extension worker. */
-importScripts('feed-core.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
+importScripts('feed-core.js', 'claude-transport.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
 const Core = XGrokCore;
 const UI = GrokFirstUI;
 const KeyStore = SuperXKeyStore;
 const BuildKeyStore = SuperXBuildConnectionStore;
+const ClaudeKeyStore = SuperXClaudeKeyStore;
 const history = SuperXHistoryStore.create(chrome.storage.local);
 const HISTORY_ALARM = 'SUPERX_HISTORY_CLEANUP';
 const clients = new Set();
@@ -19,6 +20,9 @@ let securityWrites = Promise.resolve(), securityPending = 0, securityGeneration 
 let hasSavedKey = false, rememberApiKey = true, credentialReady = false, securityFault = false, sealAttempted = false;
 let buildStatus = {connected:false,installed:false,available:false,errorCode:'BUILD_NOT_CONNECTED'}, buildStatusAt = 0, buildStatusPending;
 let buildSecret='',buildConnectionGeneration=0,buildConnectionPending=0;
+// Claude API Key (encrypted at rest like the xAI Key) and the local estimate of
+// what this extension has spent in the current billing cycle.
+let claudeKey='',claudeSpend={cycleStart:0,usd:0,requests:0},claudeSpendWrites=Promise.resolve();
 let oauthGeneration=0,oauthActionGeneration=0,oauthPendingLogins=0,oauthCredentialIdentity='',oauthReady=Promise.resolve(),providerFault=false;
 const oauth=SuperXOAuth.create({chrome,fetch:globalThis.fetch?.bind(globalThis),crypto:globalThis.crypto,
   keyStore:KeyStore.create?.({purpose:'oauth-refresh'}),onChange:onOAuthChanged});
@@ -37,12 +41,12 @@ async function initialize() {
   // Diagnostic storage is optional. Its reads/writes never gate credentials,
   // analysis or normal extension startup.
   apiDiagnosticsReady=loadAPIDiagnostics();
-  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource']);
+  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend']);
   const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','securityFault','apiBudgetPause','apiCapacityPause']);
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
-  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!['api','build','oauth','native'].includes(local.settings.provider));
+  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!['api','build','oauth','claude','native'].includes(local.settings.provider));
   if(providerFault)await chrome.storage.local.set({invalidAnswerSource:true});
   // OAuth restoration cannot delay an independent API Key or local connection.
   // Its own gate stays closed until restoration has established usable state.
@@ -53,6 +57,10 @@ async function initialize() {
   if(BuildKeyStore.envelopePresent(local.buildConnectionEncrypted)){
     try{const secret=await BuildKeyStore.open(local.buildConnectionEncrypted);if(validBuildSecret(secret))buildSecret=secret;}catch{/* Reconnect locally; API Key remains independent. */}
   }
+  if(ClaudeKeyStore.envelopePresent(local.claudeApiKeyEncrypted)){
+    try{const key=await ClaudeKeyStore.open(local.claudeApiKeyEncrypted);if(SuperXClaude.validKey(key))claudeKey=key.trim();}catch{/* Enter the Claude Key again; other connections stay independent. */}
+  }
+  claudeSpend=normalizeClaudeSpend(local.claudeSpend);
   securityFault = session.securityFault === true;
   const storedCredential=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined;
   rememberApiKey = typeof local.rememberApiKey === 'boolean' ? local.rememberApiKey : Boolean(storedCredential) || !validKey(session.apiKey);
@@ -103,8 +111,30 @@ async function initialize() {
 function validKey(value) { return typeof value==='string' && Boolean(value.trim()) && value.length<=500 && !/[\r\n]/.test(value); }
 function securityAllowsCalls() { return !securityFault && credentialReady && securityPending===0; }
 function buildReady() { return buildConnectionPending===0&&validBuildSecret(buildSecret)&&buildStatus.connected===true&&buildStatus.installed===true&&buildStatus.available===true&&buildStatus.authenticated===true&&buildStatus.permission!==false; }
+function normalizeClaudeSpend(value){
+  const number=field=>Number.isFinite(value?.[field])&&value[field]>=0?value[field]:0;
+  return {cycleStart:number('cycleStart'),usd:number('usd'),requests:Math.trunc(number('requests'))};
+}
+function claudeSpendSummary(now=Date.now()){
+  const cycle=Core.claudeCycle(now,settings?.claudeCycleDay);
+  const spend=claudeSpend.cycleStart===cycle.start?claudeSpend:{cycleStart:cycle.start,usd:0,requests:0};
+  const budgetUsd=settings?.claudeBudgetUsd??Core.DEFAULT_SETTINGS.claudeBudgetUsd;
+  return {configured:SuperXClaude.validKey(claudeKey),usd:Math.round(spend.usd*1e6)/1e6,requests:spend.requests,budgetUsd,
+    cycleStart:cycle.start,cycleEnd:cycle.end,exhausted:budgetUsd>0&&spend.usd>=budgetUsd};
+}
+function recordClaudeSpend(usage){
+  const usd=SuperXClaude.ticksToUSD(usage?.cost_in_usd_ticks);
+  if(!usd)return;
+  const cycle=Core.claudeCycle(Date.now(),settings.claudeCycleDay);
+  if(claudeSpend.cycleStart!==cycle.start)claudeSpend={cycleStart:cycle.start,usd:0,requests:0};
+  claudeSpend={cycleStart:cycle.start,usd:claudeSpend.usd+usd,requests:claudeSpend.requests+1};
+  const snapshot=claudeSpend;
+  claudeSpendWrites=claudeSpendWrites.catch(()=>{}).then(()=>chrome.storage.local.set({claudeSpend:snapshot}));
+  void claudeSpendWrites.catch(()=>{});
+}
 function providerAllowsCalls(s=settings) {
   if(providerFault)return false;
+  if(s?.provider==='claude')return SuperXClaude.validKey(claudeKey);
   if(s?.provider==='api')return securityAllowsCalls();
   if(s?.provider==='build')return buildReady();
   if(s?.provider==='oauth'){
@@ -271,7 +301,7 @@ async function publicConfig() {
   const status=securityStatus();
   const historyConfig=history.config();
   if(settings.provider==='build')ensureBuildStatus();
-  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
+  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},...(settings.provider==='claude'?{claudeStatus:claudeSpendSummary()}:{}),historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
 }
 function broadcastTriggerGuideState() {
   for(const client of clients)send(client.port,{type:'TRIGGER_GUIDE_STATE',completed:triggerGuideCompleted,persisted:triggerGuidePersisted});
@@ -451,7 +481,7 @@ function sanitizeDraft(raw) {
 function cacheKey(post, s, inputFingerprint) {
   const mode=Core.explanationMode(s);
   const prompts=['fact-check-prompts-v2-deeper',mode==='preset'?Core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
-  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.apiModel,s.language,s.webSearch,s.xSearch,
+  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v1',s.claudeModel,s.claudeMaxSearches]:s.apiModel,s.language,s.webSearch,s.xSearch,
     'api-v11-context-images',mode,'only',
     Core.apiPostIdentity(post,s),...prompts,selectedEffort(s)]);
 }
@@ -464,13 +494,13 @@ function sanitizeAnalysis(raw) {
 }
 function commentCacheKey(post,s,inputFingerprint,analysis) {
   const prompts=['comments-prompt-v1',s.commentsPrompt];
-  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.apiModel,s.language,Core.postFingerprint(post),analysis,...prompts,selectedEffort(s)]);
+  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v1',s.claudeModel,s.claudeMaxSearches]:s.apiModel,s.language,Core.postFingerprint(post),analysis,...prompts,selectedEffort(s)]);
 }
 function commentsJob(job) { return job.settings.task==='comments'; }
 function draftJob(job) { return job.settings.task==='draft'; }
-function billingMetadata(value,provider) { return ['api','build','oauth'].includes(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
+function billingMetadata(value,provider) { return ['api','build','oauth','claude'].includes(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
 function requestMetadata(value,provider) {
-  if(!['api','oauth'].includes(provider))return {};
+  if(!['api','oauth','claude'].includes(provider))return {};
   let diagnostics;
   try{diagnostics=(Core.sanitizedRequestDiagnostics||GrokFirstAPI.sanitizedRequestDiagnostics)?.(value?.requestDiagnostics);}catch{/* Invalid diagnostic data is never forwarded. */}
   return diagnostics?{requestDiagnostics:diagnostics}:{};
@@ -603,7 +633,7 @@ function waitForAbort(promise, signal) {
 async function openSettings(focus) {
   // Replace stale focus requests even when the caller uses a generic Settings
   // entry point or sends an unlock target from an older content script.
-  try { await chrome.storage.session.set({superxOptionsFocus:{id:focus==='oauth'||settings.provider==='oauth'?'oauth':focus==='build'||settings.provider==='build'?'build':'api-key',nonce:crypto.randomUUID()}}); }
+  try { await chrome.storage.session.set({superxOptionsFocus:{id:focus==='oauth'||settings.provider==='oauth'?'oauth':focus==='build'||settings.provider==='build'?'build':focus==='claude'||settings.provider==='claude'?'claude':'api-key',nonce:crypto.randomUUID()}}); }
   catch { /* The settings page remains reachable when session storage fails. */ }
   await chrome.runtime.openOptionsPage();
 }
@@ -889,7 +919,7 @@ async function executeJob(job) {
     job.billing={...job.billing,...billingMetadata(result,job.settings.provider)};
     if(result.requestDiagnostics)job.requestDiagnostics=result.requestDiagnostics;
 
-    if(['api','oauth'].includes(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
+    if(['api','oauth','claude'].includes(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
     if(commentsJob(job))result.comments=GrokFirstAPI.validateComments(result.comments);
     else {
       const reader=Core.readerOutput(result.text,{final:true});
@@ -939,8 +969,8 @@ async function executeJob(job) {
       const partialResult=partialText?withBillingMetadata({...retained,...errorBilling,...diagnosticMetadata,text:partialText,verificationStatus:'incomplete'},job.settings.provider,job.settings.apiVerification):undefined;
       if(partialResult&&!commentsJob(job))job.retainedFactCheck=sanitizeAnalysis(partialResult);
       const safeError=e.code==='MODEL_UNSUPPORTED'?GrokFirstAPI.publicError(e):job.settings.provider==='build'?SuperXBuild.publicError(e):GrokFirstAPI.publicError(e);
-      const budgetFailure=['api','oauth'].includes(job.settings.provider)?apiBudgetFailure(e):undefined;
-      const capacityFailure=['api','oauth'].includes(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
+      const budgetFailure=['api','oauth','claude'].includes(job.settings.provider)?apiBudgetFailure(e):undefined;
+      const capacityFailure=['api','oauth','claude'].includes(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
       if(partialResult&&!draftJob(job))rememberHistoryResult(job.historyTicket,{...partialResult,completedAt:Date.now()},false,job.historyLanguage);
       rememberAPIDiagnostics(job,{...diagnosticMetadata,verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},safeError.code);
       const failureMetadata={...errorBilling,...diagnosticMetadata,...(commentsJob(job)?(budgetFailure||capacityFailure?{verificationFailure:budgetFailure||capacityFailure}:{}):{...verificationMetadata({verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},job.settings.apiVerification),partialResult})};
@@ -984,6 +1014,14 @@ async function runAPI(job,onUpdate) {
     const authorization={getAccessToken:()=>token(),onUnauthorized:(rejectedToken)=>token(true,rejectedToken)};
     if(commentsJob(job))return GrokFirstAPI.generateComments(job.post,job.settings,undefined,{analysis:job.analysis,signal,authorization});
     return GrokFirstAPI.run(job.post,job.settings,undefined,{signal,onUpdate,authorization});
+  }
+  if(job.settings.provider==='claude'){
+    const key=claudeKey;
+    if(!SuperXClaude.validKey(key))throw Object.assign(new Error('请打开设置并输入 Claude API Key。'),{code:'NEEDS_KEY'});
+    if(claudeSpendSummary().exhausted)throw Object.assign(new Error('已达到本周期的 Claude 花费上限。'),{code:'CLAUDE_BUDGET'});
+    // Every finished or failed attempt adds the cost it reported, once.
+    const call=commentsJob(job)?GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal}):GrokFirstAPI.run(job.post,job.settings,key,{signal,onUpdate});
+    return call.then(value=>{recordClaudeSpend(value?.usage);return value;},error=>{recordClaudeSpend(error?.usage||error?.partialResult?.usage);throw error;});
   }
   if(job.settings.provider!=='api')throw Object.assign(new Error('Unknown answer source.'),{code:'PROVIDER_UNAVAILABLE'});
   const session=await waitForAbort(chrome.storage.session.get('apiKey'),signal);
@@ -1136,6 +1174,22 @@ function queueSettingsMutation(input) {
   securityWrites=operation;
   return operation;
 }
+async function saveClaudeKey(message){
+  const raw=typeof message.apiKey==='string'?message.apiKey.trim():'';
+  if(raw&&!SuperXClaude.validKey(raw))return {ok:false,errorKey:'claude.keyInvalid'};
+  if(message.settings!==undefined&&Core.normalizeSettings(message.settings).provider!=='claude'&&raw)return {ok:false,errorKey:'options.providerChoice'};
+  for(const job of [...jobs.values()].filter(job=>job.settings.provider==='claude'))abortJob(job);
+  try{
+    if(raw){const envelope=await ClaudeKeyStore.seal(raw);await chrome.storage.local.set({claudeApiKeyEncrypted:envelope});claudeKey=raw;}
+    else{claudeKey='';await chrome.storage.local.remove('claudeApiKeyEncrypted');await ClaudeKeyStore.clear();}
+  }catch{return {ok:false,errorKey:'claude.keyStorageError'};}
+  for(const key of Object.keys(cache)){try{if(JSON.parse(key)[1]==='claude')delete cache[key];}catch{delete cache[key];}}
+  cacheEpoch++;void persistCache(cacheEpoch).catch(()=>{});
+  if(message.settings!==undefined)await saveSettings(mergeTriggerPreferences(Core.normalizeSettings(message.settings),message.triggerPreferencesChanged===false));
+  else await broadcastConfig();
+  pump();
+  return {ok:true,...claudeSpendSummary()};
+}
 async function handleOAuthMessage(message,actionGeneration){
   if(message.type==='GET_OAUTH_STATUS')return {ok:true,oauthStatus:oauth.status()};
   if((message.type==='OAUTH_SET_REMEMBER'||['OAUTH_LOGIN','OAUTH_START_LOGIN'].includes(message.type)&&message.remember!==undefined)&&typeof message.remember!=='boolean')return {ok:false,errorCode:'OAUTH_DEVICE_INVALID',oauthStatus:oauth.status()};
@@ -1177,7 +1231,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     const raw=message.apiKey,apiKey=typeof raw==='string'?raw.trim():raw==null?'':null;
     if(apiKey===null||typeof raw==='string'&&(/[\r\n]/.test(raw)||raw.trim()&&!validKey(raw))) {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
     if(message.remember!==undefined&&typeof message.remember!=='boolean') {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
-    if(message.settings?.provider!==undefined&&!['api','oauth','build'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!['api','oauth','build','claude'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=message.settings===undefined?undefined:Core.normalizeSettings(message.settings);
     if(next&&!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     queueSecurityMutation({apiKey,remember:message.remember,settings:next,triggerPreferencesChanged:message.triggerPreferencesChanged})
@@ -1204,7 +1258,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     return true;
   }
   if(trustedUI(sender) && message?.type==='SAVE_SETTINGS') {
-    if(message.settings?.provider!==undefined&&!['api','oauth','build'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!['api','oauth','build','claude'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=Core.normalizeSettings(message.settings);
     if(!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     // Join the credential chain at receipt so even same-tick saves apply in the
@@ -1244,6 +1298,16 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       }catch{return {ok:false,errorKey:'history.storageError'};}
     }
     if(message.type==='CLEAR_CACHE') { await clearStoredCache();return {ok:true}; }
+    if(message.type==='GET_CLAUDE_STATUS')return {ok:true,...claudeSpendSummary()};
+    if(message.type==='SAVE_CLAUDE_KEY'||message.type==='CLEAR_CLAUDE_KEY'){
+      const operation=securityWrites.catch(()=>{}).then(()=>saveClaudeKey(message.type==='CLEAR_CLAUDE_KEY'?{apiKey:''}:message));
+      securityWrites=operation;return operation;
+    }
+    if(message.type==='RESET_CLAUDE_SPEND'){
+      claudeSpend={cycleStart:Core.claudeCycle(Date.now(),settings.claudeCycleDay).start,usd:0,requests:0};
+      await chrome.storage.local.set({claudeSpend});await broadcastConfig();
+      return {ok:true,...claudeSpendSummary()};
+    }
     return {ok:false,error:'未知操作。'};
   })().then(respond).catch(()=>respond({ok:false,error:'扩展操作失败，请重新加载扩展。'}));
   return true;

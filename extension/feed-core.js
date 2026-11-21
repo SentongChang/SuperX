@@ -29,6 +29,28 @@
     {value:'grok-4.6',label:'Grok 4.6',efforts:['low','medium','high','xhigh'],defaultEffort:'low'},
     {value:'grok-4.7',label:'Grok 4.7',efforts:['low','medium','high','xhigh'],defaultEffort:'low'}
   ].map(profile=>Object.freeze({...profile,efforts:Object.freeze(profile.efforts)})));
+  // Claude (Anthropic Messages API). Prices are USD per million tokens from the
+  // official price list; they only drive the local budget estimate. The
+  // Anthropic Console remains the authoritative usage and billing record.
+  const CLAUDE_MODELS = Object.freeze([
+    {value:'claude-haiku-5-5',label:'Claude Haiku 5.5',input:0.10,output:0.50,cacheRead:0.01,longInput:0.50,longOutput:2.50,longCacheRead:0.05,longThreshold:100000,webSearchTool:'web_search_20250305',fallbacks:false},
+    {value:'claude-sonnet-5-5',label:'Claude Sonnet 5.5',input:2,output:10,cacheRead:0.10,webSearchTool:'web_search_20260209',fallbacks:true},
+    {value:'claude-opus-5-5',label:'Claude Opus 5.5',input:4,output:20,cacheRead:0.20,webSearchTool:'web_search_20260209',fallbacks:true}
+  ].map(Object.freeze));
+  const CLAUDE_EFFORTS = Object.freeze(['low','medium','high']);
+  const CLAUDE_WEB_SEARCH_USD = 0.01;
+  function claudeModelProfile(model) { return CLAUDE_MODELS.find(profile=>profile.value===model)||null; }
+  function claudeEffort(value) { return CLAUDE_EFFORTS.includes(value)?value:'medium'; }
+  // Local billing cycle: it starts on the configured day (1-28) at 00:00 local
+  // time, matching a monthly subscription credit that does not roll over.
+  function claudeCycle(now=Date.now(), day=15) {
+    const resetDay=Math.min(28,Math.max(1,Math.trunc(Number(day))||15));
+    const date=new Date(now);
+    let start=new Date(date.getFullYear(),date.getMonth(),resetDay);
+    if(start.getTime()>date.getTime())start=new Date(date.getFullYear(),date.getMonth()-1,resetDay);
+    const end=new Date(start.getFullYear(),start.getMonth()+1,resetDay);
+    return {start:start.getTime(),end:end.getTime(),day:resetDay};
+  }
   function modelProfile(model) {
     const value=model==='grok-4.3-latest'?'grok-4.3':model;
     return API_MODELS.find(profile=>profile.value===value)||null;
@@ -58,12 +80,14 @@
     return ['auto','none','minimal','low','medium','high','xhigh'].includes(value)?value:'none';
   }
   function providerModel(settings) {
+    if(settings?.provider==='claude')return claudeModelProfile(settings.claudeModel)?settings.claudeModel:'claude-haiku-5-5';
     return settings?.provider==='oauth'?settings.oauthModel||'grok-4.3':settings?.provider==='build'?settings.buildModel||'grok-4.3':settings?.apiModel||'grok-4.3';
   }
   function providerEffort(settings) {
+    if(settings?.provider==='claude')return claudeEffort(settings.claudeEffort);
     return settings?.provider==='oauth'?oauthReasoningEffort(settings.oauthReasoningEffort):settings?.provider==='build'?buildReasoningEffort(providerModel(settings),settings.buildReasoningEffort):reasoningEffort(providerModel(settings),settings?.apiReasoningEffort);
   }
-  const API_FAILURE_PROVIDER_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_image','invalid_image_url','image_parse_error','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','rate_limit_exceeded','rate_limit_error','too_many_requests','resource_exhausted','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','server_error','internal_server_error','internal_error','service_unavailable','service_unavailable_error','overloaded_error','timeout','request_timeout','gateway_timeout','tool_error','tool_unavailable','search_error','search_unavailable','content_filter']);
+  const API_FAILURE_PROVIDER_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_image','invalid_image_url','image_parse_error','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','rate_limit_exceeded','rate_limit_error','too_many_requests','resource_exhausted','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','server_error','internal_server_error','internal_error','service_unavailable','service_unavailable_error','overloaded_error','timeout','request_timeout','gateway_timeout','tool_error','tool_unavailable','search_error','search_unavailable','content_filter','billing_error','not_found_error','api_error']);
   function apiFailureProviderCode(value){
     if(typeof value!=='string'||value.length>64)return undefined;
     const code=value.toLowerCase().replace(/-/g,'_');
@@ -81,8 +105,8 @@
   const AUTO_RETRY_DELAY_MS=3000;
   const AUTO_RETRY_LIMIT=5;
   const RETRY_CANCEL_CODES=new Set(['CANCELED','CANCELLED','BUILD_CANCELED','BUILD_CANCELLED','BUILD_CANCEL_UNCONFIRMED','RAIL_COLLAPSED']);
-  const RETRY_SETUP_CODES=new Set(['NEEDS_KEY','KEY_MIGRATION_REQUIRED','POST_INVALID','URL_SEARCH_REQUIRED','BUILD_CONNECTION_REQUIRED','BUILD_AUTH_FAILED','BUILD_PERMISSION_REQUIRED','BUILD_LOGIN_REQUIRED','BUILD_NATIVE_MISSING','BUILD_UNAVAILABLE','BUILD_VERSION_UNSUPPORTED','BUILD_CONFIG_UNSUPPORTED','BUILD_MODEL_UNSUPPORTED','BUILD_EFFORT_UNSUPPORTED','BUILD_TOOL_POLICY','BUILD_PROTOCOL_ERROR','BUILD_ACCESS_DENIED']);
-  const RETRY_BUDGET_CODES=new Set(['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded']);
+  const RETRY_SETUP_CODES=new Set(['NEEDS_KEY','CLAUDE_BUDGET','KEY_MIGRATION_REQUIRED','POST_INVALID','URL_SEARCH_REQUIRED','BUILD_CONNECTION_REQUIRED','BUILD_AUTH_FAILED','BUILD_PERMISSION_REQUIRED','BUILD_LOGIN_REQUIRED','BUILD_NATIVE_MISSING','BUILD_UNAVAILABLE','BUILD_VERSION_UNSUPPORTED','BUILD_CONFIG_UNSUPPORTED','BUILD_MODEL_UNSUPPORTED','BUILD_EFFORT_UNSUPPORTED','BUILD_TOOL_POLICY','BUILD_PROTOCOL_ERROR','BUILD_ACCESS_DENIED']);
+  const RETRY_BUDGET_CODES=new Set(['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','billing_error']);
   const RETRY_ACCESS_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','content_filter']);
   const RETRY_SERVICE_CODES=new Set(['API_ERROR','API_INCOMPLETE','API_STREAM_INTERRUPTED','API_STREAM_ERROR','API_LANGUAGE_MISMATCH','API_CAPACITY','RATE_LIMIT','TIMEOUT','COMMENTS_INVALID_RESPONSE','BUILD_BUSY','BUILD_TIMEOUT','BUILD_DISCONNECTED','BUILD_RATE_LIMIT','BUILD_QUOTA','BUILD_OUTPUT_INVALID','BUILD_LANGUAGE_MISMATCH','BUILD_SEARCH_NOT_PERFORMED','UNKNOWN']);
   function autoRetryDecision(value) {
@@ -262,7 +286,18 @@
     return Object.fromEntries(Object.entries(DEFAULT_CUSTOM_TRIGGERS).map(([key,fallback])=>[key,
       typeof fallback==='boolean'?(typeof value[key]==='boolean'?value[key]:fallback):boundedNumber(value[key],fallback,0,30000)]));
   }
+  // Claude bills every request to the user's own API credit. Unless the user
+  // explicitly opts in, the effective trigger set is the post button only.
+  // Saved trigger preferences stay untouched for the other connections.
+  const CLAUDE_MANUAL_TRIGGERS=Object.freeze({...DEFAULT_CUSTOM_TRIGGERS,manual:true,postHover:false,buttonHover:false,detailMain:false,detailReplies:false});
+  function claudeManualOnly(settings){return settings?.provider==='claude'&&settings.claudeAutoTrigger!==true;}
+  function effectiveTriggerSettings(settings){
+    if(!claudeManualOnly(settings))return settings;
+    const mode=triggerMode(settings);
+    return {...settings,triggerMode:mode==='paused'?'paused':'custom',enabled:mode!=='paused',customTriggers:CLAUDE_MANUAL_TRIGGERS};
+  }
   function postTriggerAllowed(settings,kind,post,pageUrl) {
+    settings=effectiveTriggerSettings(settings);
     const mode=triggerMode(settings);
     if(mode==='paused')return false;
     if(kind==='recheck')return true;
@@ -298,6 +333,12 @@
     buildPort: 2419,
     buildModel: 'grok-4.3',
     buildReasoningEffort: 'none',
+    claudeModel: 'claude-haiku-5-5',
+    claudeEffort: 'medium',
+    claudeMaxSearches: 3,
+    claudeBudgetUsd: 100,
+    claudeCycleDay: 15,
+    claudeAutoTrigger: false,
     apiConcurrency: 3,
     apiVerification: 'only',
     webSearch: true,
@@ -390,7 +431,7 @@
     const mode=triggerMode(value);
     return {
       // The retired page automation provider is unrelated to Grok Build.
-      provider: ['api','build','oauth'].includes(value.provider) ? value.provider : defaultProvider,
+      provider: ['api','build','oauth','claude'].includes(value.provider) ? value.provider : defaultProvider,
       enabled: mode!=='paused',
       triggerMode: mode,
       customTriggers: normalizeCustomTriggers(value.customTriggers),
@@ -413,6 +454,12 @@
       buildPort: boundedNumber(value.buildPort, DEFAULT_SETTINGS.buildPort, 1024, 65535),
       buildModel: normalizedBuildModel,
       buildReasoningEffort: buildReasoningEffort(normalizedBuildModel,migrateBuildDefaults?DEFAULT_SETTINGS.buildReasoningEffort:value.buildReasoningEffort),
+      claudeModel: claudeModelProfile(value.claudeModel) ? value.claudeModel : DEFAULT_SETTINGS.claudeModel,
+      claudeEffort: claudeEffort(value.claudeEffort),
+      claudeMaxSearches: boundedNumber(value.claudeMaxSearches, DEFAULT_SETTINGS.claudeMaxSearches, 1, 10),
+      claudeBudgetUsd: boundedNumber(value.claudeBudgetUsd, DEFAULT_SETTINGS.claudeBudgetUsd, 0, 100000),
+      claudeCycleDay: boundedNumber(value.claudeCycleDay, DEFAULT_SETTINGS.claudeCycleDay, 1, 28),
+      claudeAutoTrigger: value.claudeAutoTrigger === true,
       apiConcurrency: !currentDefaults&&concurrency===4?DEFAULT_SETTINGS.apiConcurrency:concurrency,
       // Legacy explanation/combined/off choices all become one fact-check task.
       apiVerification: 'only',
@@ -790,7 +837,7 @@
   function apiPostIdentity(post, settings) {
     // Comments still pass no settings because they use their visible snapshot
     // and analysis context. Native tasks keep their existing local attribution.
-    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',['build','oauth'].includes(settings.provider)?settings.provider:'api',canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
+    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',['build','oauth','claude'].includes(settings.provider)?settings.provider:'api',canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
     return post ? JSON.stringify([nativePostIdentity(post),
       (Array.isArray(post.quotedContext) ? post.quotedContext : []).map(nativePostIdentity)]) : '';
   }
@@ -863,5 +910,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, LANGUAGES, API_MODELS, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });

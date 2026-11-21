@@ -1,5 +1,7 @@
 # SuperX
 
+> **本 fork 新增：Claude API Key 连接方式**，可用 Claude Max 每月附带的 API 额度做事实核查；默认 Haiku 5.5、手动触发、带周期花费上限。说明见 [docs/CLAUDE.zh-CN.md](docs/CLAUDE.zh-CN.md)。
+
 **读懂 X，边刷边核查。**
 
 [下载 1.1.6](https://github.com/bwjoke/SuperX/releases/download/v1.1.6/SuperX.zip) · [Chrome 商店](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo) · [更新说明](https://github.com/bwjoke/SuperX/releases/tag/v1.1.6) · [官网](https://superx.vip/) · [支持](https://github.com/bwjoke/SuperX/issues) · [English](README.md) · [隐私说明](PRIVACY.md)

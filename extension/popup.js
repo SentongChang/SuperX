@@ -39,8 +39,17 @@
     }
     return null;
   }
+  function claudeHint() {
+    const status=config.claudeStatus,parts=[];
+    if(!currentSettings.claudeAutoTrigger)parts.push(ui.t("claude.popupHint",uiLanguage));
+    if(status?.cycleEnd){
+      const day=value=>{try{return new Date(value).toLocaleDateString(uiLanguage,{month:"short",day:"numeric"});}catch{return "";}};
+      parts.push(ui.t(status.budgetUsd>0?"claude.spend":"claude.spendNoLimit",uiLanguage,{usd:(status.usd||0).toFixed(2),budget:status.budgetUsd,requests:status.requests||0,start:day(status.cycleStart),end:day(status.cycleEnd)}));
+    }
+    return parts.join(" ");
+  }
   function renderTriggerSummary(mode) {
-    $("custom-trigger-summary").hidden=!loaded||mode!=="custom";
+    $("custom-trigger-summary").hidden=!loaded||mode!=="custom"||Boolean(core.claudeManualOnly?.(currentSettings));
     const triggers=currentSettings.customTriggers;
     const state=(id,enabled,wait,unavailable=false)=>{
       const element=$(id),kind=unavailable?"unavailable":enabled?"on":"off";
@@ -61,9 +70,10 @@
     $("enabled-label").textContent = ui.t(loaded ? mode==="paused"?"trigger.pausedStatus":reason||"trigger."+mode+"Status" : "common.loading",uiLanguage,{model:currentSettings.oauthModel});
     $("indicator").dataset.enabled = String(loaded && !reason && mode!=="paused");
     const build=currentSettings.provider==="build",oauth=currentSettings.provider==="oauth";
-    $("provider-label").textContent = ui.t(oauth?"popup.oauthLabel":build ? "popup.buildLabel" : "popup.apiLabel",uiLanguage,{count:currentSettings.apiConcurrency,transport:currentSettings.buildTransport.toUpperCase()});
-    $("provider-hint").hidden = mode==="custom";
-    $("provider-hint").textContent = mode==="custom"?"":ui.t(mode==="automatic"?(oauth?"popup.oauthHint":build?"popup.buildHint":"popup.apiHint"):"trigger.pausedHelp",uiLanguage);
+    const claude=currentSettings.provider==="claude";
+    $("provider-label").textContent = ui.t(claude?"claude.modeLabel":oauth?"popup.oauthLabel":build ? "popup.buildLabel" : "popup.apiLabel",uiLanguage,{count:currentSettings.apiConcurrency,transport:currentSettings.buildTransport.toUpperCase()});
+    $("provider-hint").hidden = mode==="custom"&&!claude;
+    $("provider-hint").textContent = claude&&mode!=="paused"?claudeHint():mode==="custom"?"":ui.t(mode==="automatic"?(oauth?"popup.oauthHint":build?"popup.buildHint":"popup.apiHint"):"trigger.pausedHelp",uiLanguage);
     renderTriggerSummary(mode);
     for(const choice of triggerModes){const input=$("trigger-mode-"+choice);input.checked=choice===mode;input.disabled=busy||!loaded;}
     $("options").hidden = false;
@@ -76,7 +86,7 @@
   }
   function showError(key,error) { errorMessage = {key,error};render(); }
   async function openKeySettings() {
-    const result = await chrome.runtime.sendMessage({type:"OPEN_SETTINGS",focus:currentSettings.provider==="oauth"?"oauth":currentSettings.provider==="build" ? "build" : "api-key"});
+    const result = await chrome.runtime.sendMessage({type:"OPEN_SETTINGS",focus:currentSettings.provider==="oauth"?"oauth":currentSettings.provider==="build" ? "build" : currentSettings.provider==="claude" ? "claude" : "api-key"});
     if (!result?.ok) throw new Error(ui.t("errors.noResponse",uiLanguage));
   }
   async function load() {
