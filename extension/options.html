@@ -347,12 +347,26 @@
           <details id="maintenance">
             <summary id="maintenance-heading" data-i18n="options.maintenance">Maintenance &amp; troubleshooting</summary>
             <div class="maintenance-content">
-        <div class="maintenance-action compact-section" aria-labelledby="cache-heading">
-          <div>
-            <h3 id="cache-heading" data-i18n="options.answerCache">Clear answer cache</h3>
-            <p class="section-description" data-i18n="options.cacheHelp">Clears cached answers without deleting browsing history. Refresh X or retry a post afterward.</p>
+        <div class="maintenance-action answer-cache" aria-labelledby="cache-heading">
+          <h3 id="cache-heading" data-i18n="options.answerCacheTitle">Answer cache</h3>
+          <div class="field">
+            <label for="cache-retention" data-i18n="options.cacheRetention">Keep answers for</label>
+            <select id="cache-retention" aria-describedby="cache-retention-help cache-history-off">
+              <option value="session" data-i18n="options.cacheRetentionSession">Until the browser closes</option>
+              <option value="1d" data-i18n="options.cacheRetention1d">1 day</option>
+              <option value="7d" data-i18n="options.cacheRetention7d">7 days</option>
+            </select>
+            <p id="cache-retention-help" class="help" data-i18n="options.cacheRetentionHelp">Reused answers cost nothing and appear instantly. They stay on this device, counted from when each answer was made. Use Recheck for a fresh answer.</p>
+            <p id="cache-history-off" class="help" data-i18n="options.cacheRetentionHistoryOff" hidden>Browsing history is off, so answers are kept only until the browser closes.</p>
           </div>
-          <button id="clear-cache" class="secondary-button" type="button" data-i18n="options.answerCache">Clear answer cache</button>
+          <div class="cache-stats">
+            <p id="cache-stats" class="help" aria-live="polite"></p>
+            <button id="cache-stats-reset" class="text-button" type="button" data-i18n="options.cacheStatsReset" hidden>Reset count</button>
+          </div>
+          <div class="compact-section cache-clear">
+            <p class="section-description" data-i18n="options.cacheHelp">Clears saved answers without deleting browsing history or the reuse count. Refresh X or recheck a post afterward.</p>
+            <button id="clear-cache" class="secondary-button" type="button" data-i18n="options.answerCache">Clear answer cache</button>
+          </div>
         </div>
 
         <div class="maintenance-action compact-section" aria-labelledby="reload-heading">

@@ -2348,7 +2348,7 @@ test('direct-client and security labels are supplied distinctly in twelve langua
     assert.ok(Object.keys(ui.catalog[locale]).every(key=>!key.toLowerCase().includes('consent')),locale);
     assert.ok(Object.values(ui.catalog[locale]).every(value=>!value.includes('ZDR')),locale);
   }
-  assert.match(ui.t('options.cacheHelp','en'),/keeping browsing history/);
+  assert.match(ui.t('options.cacheHelp','en'),/without deleting browsing history/);
 });
 
 test('provider switching preserves credential drafts and Build saves without sending a Key',async()=>{
@@ -2816,4 +2816,16 @@ test('only the checked post\'s own Show more marks it truncated, and the flag ne
   assert.equal(main.textTruncated,true);
   const {textTruncated,...expanded}=main;
   assert.equal(core.postFingerprint(main),core.postFingerprint(expanded));
+});
+
+test('answer cache retention defaults to 1 day on disk, accepts only its three periods and falls back to session without history',()=>{
+  assert.equal(core.normalizeSettings({}).answerCacheRetention,'1d');
+  for(const value of ['session','1d','7d'])assert.equal(core.normalizeSettings({answerCacheRetention:value}).answerCacheRetention,value);
+  for(const value of ['3d','forever',2,null,'toString'])assert.equal(core.normalizeSettings({answerCacheRetention:value}).answerCacheRetention,'1d',String(value));
+  const day=24*60*60*1000;
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'session'})},{ttlMs:day,area:'session',maxEntries:160,maxBytes:4_000_000});
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'1d'})},{ttlMs:day,area:'local',maxEntries:120,maxBytes:2_000_000});
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'7d'})},{ttlMs:7*day,area:'local',maxEntries:120,maxBytes:2_000_000});
+  assert.equal(core.cacheRetention({answerCacheRetention:'7d'},false),core.CACHE_RETENTIONS.session);
+  assert.equal(core.cacheRetention(undefined),core.CACHE_RETENTIONS['1d']);
 });

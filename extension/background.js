@@ -26,7 +26,12 @@ let claudeKey='',claudeSpend={cycleStart:0,usd:0,requests:0},claudeSpendWrites=P
 let oauthGeneration=0,oauthActionGeneration=0,oauthPendingLogins=0,oauthCredentialIdentity='',oauthReady=Promise.resolve(),providerFault=false;
 const oauth=SuperXOAuth.create({chrome,fetch:globalThis.fetch?.bind(globalThis),crypto:globalThis.crypto,
   keyStore:KeyStore.create?.({purpose:'oauth-refresh'}),onChange:onOAuthChanged});
-const CACHE_TTL = 24 * 60 * 60 * 1000;
+// Diagnostics keep a fixed lifetime, independent of answer retention.
+const DIAGNOSTICS_TTL = 24 * 60 * 60 * 1000;
+// Answers kept for a day period persist under their own key. The retired
+// local 'cache' key is still deleted unread, so old caches are never imported.
+const LOCAL_CACHE_KEY = 'answerCache', CACHE_STATS_KEY = 'answerCacheStats';
+let historyEnabled = true, pendingCacheWrite, cacheStats = normalizeCacheStats(), cacheStatsWrites = Promise.resolve();
 // Claude pre-screen results for this browser session. A screen does not
 // depend on the answer language or model, and it has its own fixed lifetime.
 let triageCache = {};
@@ -45,7 +50,7 @@ async function initialize() {
   // Diagnostic storage is optional. Its reads/writes never gate credentials,
   // analysis or normal extension startup.
   apiDiagnosticsReady=loadAPIDiagnostics();
-  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend']);
+  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend',LOCAL_CACHE_KEY,CACHE_STATS_KEY,SuperXHistoryStore.ENABLED_KEY]);
   const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','claudeTriageCache','securityFault','apiBudgetPause','apiCapacityPause']);
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
@@ -65,6 +70,8 @@ async function initialize() {
     try{const key=await ClaudeKeyStore.open(local.claudeApiKeyEncrypted);if(SuperXClaude.validKey(key))claudeKey=key.trim();}catch{/* Enter the Claude Key again; other connections stay independent. */}
   }
   claudeSpend=normalizeClaudeSpend(local.claudeSpend);
+  cacheStats=normalizeCacheStats(local[CACHE_STATS_KEY]);
+  historyEnabled=local[SuperXHistoryStore.ENABLED_KEY]!==false;
   securityFault = session.securityFault === true;
   const storedCredential=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined;
   rememberApiKey = typeof local.rememberApiKey === 'boolean' ? local.rememberApiKey : Boolean(storedCredential) || !validKey(session.apiKey);
@@ -93,13 +100,10 @@ async function initialize() {
   const stored=await chrome.storage.local.get(['apiKey','apiKeyEncrypted','apiKeyVault']);
   hasSavedKey=KeyStore.envelopePresent(stored.apiKeyEncrypted)||validKey(stored.apiKey)||stored.apiKeyVault!==undefined;
   credentialReady=validKey(session.apiKey);
-  cache = pruneCache(session.cache); triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};
+  triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};
+  await restoreCache(local[LOCAL_CACHE_KEY],session.cache);
   // Delete the old persistent post cache without reading or migrating its data.
   await chrome.storage.local.remove('cache');
-  // Browser-session data expires after 24 hours, without a provider call.
-  if(session.cache!==undefined&&(!session.cache||typeof session.cache!=='object'||Array.isArray(session.cache)||Object.keys(session.cache).length!==Object.keys(cache).length)) {
-    try{await persistCache(cacheEpoch);}catch{/* Clean memory stays usable if session cleanup fails; later cache writes retry. */}
-  }
   // Only X reports are persisted; browser locale remains a fresh-install fallback.
   uiLanguage = UI.normalizeLanguage(session.uiLanguage || local.uiLanguage || uiLanguage);
   // Persist the supported selection while keeping credentials in their existing storage.
@@ -110,6 +114,12 @@ async function initialize() {
   // or paid work, and no credential is passed to this store.
   void history.prune().then(()=>broadcastHistoryConfig()).catch(()=>{});
   try{await chrome.alarms?.create(HISTORY_ALARM,{periodInMinutes:60});}catch{/* Reads and writes still remove expired records. */}
+  // Saved answers can outlive a Grok login that was not remembered. Once the
+  // login is restored, answers for any other account leave disk as well.
+  void oauthReady.then(()=>{
+    const identity=oauth.status().credentialId||'',stale=partition=>partition[1]==='oauth'&&partition[2]?.[0]!==identity;
+    if(Object.keys(cache).some(key=>stale(cachePartition(key))))return purgeCacheEntries(stale);
+  }).catch(()=>{});
   await guideReady;
 }
 function validKey(value) { return typeof value==='string' && Boolean(value.trim()) && value.length<=500 && !/[\r\n]/.test(value); }
@@ -125,6 +135,24 @@ function claudeSpendSummary(now=Date.now()){
   const budgetUsd=settings?.claudeBudgetUsd??Core.DEFAULT_SETTINGS.claudeBudgetUsd;
   return {configured:SuperXClaude.validKey(claudeKey),usd:Math.round(spend.usd*1e6)/1e6,requests:spend.requests,budgetUsd,
     cycleStart:cycle.start,cycleEnd:cycle.end,exhausted:budgetUsd>0&&spend.usd>=budgetUsd};
+}
+function normalizeCacheStats(value){
+  const number=field=>Number.isFinite(value?.[field])&&value[field]>=0?value[field]:0;
+  return {since:Math.trunc(number('since')),hits:Math.trunc(number('hits')),tokens:Math.trunc(number('tokens')),usd:number('usd')};
+}
+function persistCacheStats(){
+  const snapshot=cacheStats;
+  cacheStatsWrites=cacheStatsWrites.catch(()=>{}).then(()=>chrome.storage.local.set({[CACHE_STATS_KEY]:snapshot}));
+  return cacheStatsWrites;
+}
+// What a reused answer would have cost again: its reported tokens, and its
+// dollars only where the user pays per token. Counts only, no post identity.
+function recordCacheReuse(entry,provider){
+  const usage=entry.usage||{};
+  const tokens=Number.isFinite(usage.total_tokens)?usage.total_tokens:(Number(usage.input_tokens)||0)+(Number(usage.output_tokens)||0);
+  const usd=['api','claude'].includes(provider)?SuperXClaude.ticksToUSD(usage.cost_in_usd_ticks):0;
+  cacheStats={since:cacheStats.since||Date.now(),hits:cacheStats.hits+1,tokens:cacheStats.tokens+Math.max(0,Math.trunc(tokens)),usd:cacheStats.usd+usd};
+  void persistCacheStats().catch(()=>{});
 }
 function recordClaudeSpend(usage){
   const usd=SuperXClaude.ticksToUSD(usage?.cost_in_usd_ticks);
@@ -158,8 +186,7 @@ function onOAuthChanged(){
   if(identity!==oauthCredentialIdentity){
     oauthCredentialIdentity=identity;oauthGeneration++;
     for(const job of [...jobs.values()].filter(value=>value.settings.provider==='oauth'))abortJob(job);
-    for(const key of Object.keys(cache)){try{const partition=JSON.parse(key);if(partition[1]==='oauth'&&(!identity||partition[2]?.[0]!==identity))delete cache[key];}catch{delete cache[key];}}
-    cacheEpoch++;
+    void purgeCacheEntries(partition=>partition[1]==='oauth'&&(!identity||partition[2]?.[0]!==identity)).catch(()=>{});
     if(settings?.provider==='oauth')void history.invalidateResults?.().catch(()=>{});
   }
   // Device codes and the official authorization URL go only to extension UI.
@@ -230,7 +257,7 @@ function queueBuildConnection(message,clear=false){
         buildSecret=connection.secret;
         await saveSettings(next?mergeTriggerPreferences(next,message.triggerPreferencesChanged===false):{...settings,buildPort:connection.port});
       }
-      cache=Object.fromEntries(Object.entries(cache).filter(([key])=>{try{return JSON.parse(key)[1]!=='build';}catch{return true;}}));cacheEpoch++;await persistCache(cacheEpoch);
+      await purgeCacheEntries(partition=>partition[1]==='build');
     }catch{failure=buildStorageError();buildSecret='';}
     finally{buildConnectionPending--;}
     if(generation===buildConnectionGeneration){buildStatusAt=0;buildStatus={connected:false,installed:false,available:false,errorCode:'BUILD_CONNECTION_REQUIRED'};}
@@ -289,7 +316,7 @@ async function readTriggerPage(client, supplied) {
   return pageUrl;
 }
 function paidTaskSettings(value={}) {
-  const {explainPrompt,verifyPrompt,draftPrompt,postDraftPrompt,replyDraftPrompt,commentsPrompt,interfaceLanguage,dwellMs,analysisDefaultsVersion,oauthRemember,enabled,triggerMode,customTriggers,...other}=value;
+  const {explainPrompt,verifyPrompt,draftPrompt,postDraftPrompt,replyDraftPrompt,commentsPrompt,interfaceLanguage,dwellMs,analysisDefaultsVersion,oauthRemember,enabled,triggerMode,customTriggers,answerCacheRetention,...other}=value;
   return other;
 }
 function mergeTriggerPreferences(input,preserve) {
@@ -530,7 +557,7 @@ function requestMetadata(value,provider) {
 const API_DIAGNOSTIC_CODES=new Set(['API_INCOMPLETE','API_STREAM_INTERRUPTED','API_STREAM_ERROR','API_LANGUAGE_MISMATCH','RATE_LIMIT','API_CAPACITY','API_IMAGE_INPUT','API_ERROR','CANCELED','TIMEOUT','COMMENTS_INVALID_RESPONSE']);
 function pruneAPIDiagnostics(input,now=Date.now()) {
   return (Array.isArray(input)?input:[]).slice(0,1000).flatMap(entry=>{
-    if(!entry||!API_DIAGNOSTIC_CODES.has(entry.code)||!Number.isSafeInteger(entry.recordedAt)||entry.recordedAt<0||entry.recordedAt>now||now-entry.recordedAt>=CACHE_TTL)return [];
+    if(!entry||!API_DIAGNOSTIC_CODES.has(entry.code)||!Number.isSafeInteger(entry.recordedAt)||entry.recordedAt<0||entry.recordedAt>now||now-entry.recordedAt>=DIAGNOSTICS_TTL)return [];
     const diagnostics=requestMetadata(entry,'api').requestDiagnostics;
     const verificationFailure=GrokFirstAPI.sanitizedVerificationFailure(entry.verificationFailure);
     return diagnostics?[{recordedAt:entry.recordedAt,code:entry.code,requestDiagnostics:diagnostics,...(verificationFailure?{verificationFailure}:{})}]:[];
@@ -598,18 +625,61 @@ function withBillingMetadata(value,provider,verificationMode) {
   return {...result,...billingMetadata(value,provider),...verificationMetadata(value,verificationMode),...requestMetadata(value,provider)};
 }
 function jobError(job,error,code,extra={}) { send(job.client.port,{type:commentsJob(job)?'COMMENT_ERROR':'ERROR',requestId:job.requestId,error,code,retryAttempts:job.retryAttempts||0,...extra}); }
-function freshCacheEntry(entry,now) {
-  return entry&&typeof entry==='object'&&!Array.isArray(entry)&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<CACHE_TTL
+function cacheRetention() { return Core.cacheRetention(settings,historyEnabled); }
+function plainObject(value) { return Boolean(value)&&typeof value==='object'&&!Array.isArray(value); }
+function freshCacheEntry(entry,now,retention=cacheRetention()) {
+  return plainObject(entry)&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<retention.ttlMs
     &&(typeof entry.text!=='string'||Core.readerOutput(entry.text,{final:true}).kind==='content');
 }
-function pruneCache(input,now=Date.now()) {
-  const entries=input&&typeof input==='object'&&!Array.isArray(input)?Object.entries(input):[];
-  const recent=entries.filter(([,value])=>freshCacheEntry(value,now)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,160);
+// Eviction is oldest-generated first, whatever was reused most recently.
+function pruneCache(input,now=Date.now(),retention=cacheRetention()) {
+  const entries=plainObject(input)?Object.entries(input):[];
+  const recent=entries.filter(([,value])=>freshCacheEntry(value,now,retention)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,retention.maxEntries);
   const kept=[];let bytes=0;
-  for(const entry of recent){bytes+=new TextEncoder().encode(JSON.stringify(entry)).byteLength;if(bytes>4_000_000)break;kept.push(entry);}
+  for(const entry of recent){bytes+=new TextEncoder().encode(JSON.stringify(entry)).byteLength;if(bytes>retention.maxBytes)break;kept.push(entry);}
   return Object.fromEntries(kept);
 }
 function cachedResult(key) { const entry = cache[key]; if (freshCacheEntry(entry,Date.now())) return entry; delete cache[key]; return null; }
+function cachePartition(key) { try{return JSON.parse(key);}catch{return [];} }
+// Drops every answer the predicate matches (and any unreadable key), in
+// memory and in storage. The epoch bump stops running jobs from re-adding one.
+function purgeCacheEntries(predicate) {
+  for(const key of Object.keys(cache)){const partition=cachePartition(key);if(!partition.length||predicate(partition))delete cache[key];}
+  // Storage is written once startup has restored it, never over it.
+  const epoch=++cacheEpoch;return Promise.resolve().then(()=>ready).then(()=>persistCache(epoch));
+}
+function removeStoredCache(area) { return area==='local'?chrome.storage.local.remove(LOCAL_CACHE_KEY):chrome.storage.session.remove('cache'); }
+// Answers live in the area the current retention names. A copy left in the
+// other area by a retention change joins them once and is then removed.
+async function restoreCache(localCopy,sessionCopy) {
+  const persisted=cacheRetention().area==='local';
+  const active=persisted?localCopy:sessionCopy,inactive=persisted?sessionCopy:localCopy;
+  cache=pruneCache({...(plainObject(inactive)?inactive:{}),...(plainObject(active)?active:{})});
+  const changed=active!==undefined&&(!plainObject(active)||Object.keys(active).length!==Object.keys(cache).length);
+  if(!changed&&inactive===undefined)return;
+  try{
+    await persistCache(cacheEpoch);
+    if(inactive!==undefined)await removeStoredCache(persisted?'session':'local');
+  }catch{/* Clean memory stays usable if cleanup fails; later cache writes retry. */}
+}
+// Called after settings or history recording change. Shortening the period
+// drops older answers at once; changing area moves the answers kept.
+async function applyCacheRetention(previous) {
+  const next=cacheRetention();
+  if(next===previous)return true;
+  cache=pruneCache(cache);
+  try{
+    await persistCache(cacheEpoch);
+    if(next.area!==previous.area)await removeStoredCache(previous.area);
+    return true;
+  }catch{return false;}
+}
+// Expired answers leave storage within about an hour while the browser runs.
+function pruneStoredCache() {
+  const kept=pruneCache(cache);
+  if(Object.keys(kept).length===Object.keys(cache).length)return Promise.resolve();
+  cache=kept;return persistCache(cacheEpoch);
+}
 function triageKey(post) { return JSON.stringify(['triage-v1',Core.CLAUDE_TRIAGE_MODEL,Core.canonicalPostUrl(post.url),Core.postFingerprint(post)]); }
 function freshTriage(entry,now) {
   return entry&&typeof entry==='object'&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<TRIAGE_TTL&&Core.sanitizeTriage(entry.triage)!==null;
@@ -644,14 +714,24 @@ function persistQuotas() {
   quotaWrites=quotaWrites.catch(()=>{}).then(()=>chrome.storage.session.set({quotas:{...quotas}}));
   return quotaWrites;
 }
+// Writes coalesce: while one waits its turn, later calls share it, and it
+// saves the newest snapshot when it starts. A burst of answers rewrites the
+// stored cache at most twice, which matters once it lives on disk.
 function persistCache(epoch) {
-  cacheWrites=cacheWrites.catch(()=>{}).then(()=>epoch===cacheEpoch?chrome.storage.session.set({cache:{...cache}}):undefined);
-  return cacheWrites;
+  if(pendingCacheWrite){pendingCacheWrite.epoch=epoch;return pendingCacheWrite.promise;}
+  const pending={epoch};
+  pending.promise=cacheWrites.catch(()=>{}).then(()=>{
+    if(pendingCacheWrite===pending)pendingCacheWrite=undefined;
+    if(pending.epoch!==cacheEpoch)return;
+    const snapshot={...cache};
+    return cacheRetention().area==='local'?chrome.storage.local.set({[LOCAL_CACHE_KEY]:snapshot}):chrome.storage.session.set({cache:snapshot});
+  });
+  pendingCacheWrite=pending;cacheWrites=pending.promise;return pending.promise;
 }
 function clearStoredCache() {
-  cache={};triageCache={};cacheEpoch++;
+  cache={};triageCache={};cacheEpoch++;pendingCacheWrite=undefined;
   cacheWrites=cacheWrites.catch(()=>{}).then(async()=>{
-    const results=await Promise.allSettled([chrome.storage.session.remove(['cache','claudeTriageCache']),chrome.storage.local.remove('cache')]);
+    const results=await Promise.allSettled([chrome.storage.session.remove(['cache','claudeTriageCache']),chrome.storage.local.remove(['cache',LOCAL_CACHE_KEY])]);
     const failed=results.find(value=>value.status==='rejected');
     if(failed)throw failed.reason;
   });
@@ -690,7 +770,7 @@ async function openSettings(focus) {
 async function openHistory(){await chrome.tabs.create({url:chrome.runtime.getURL('history.html')});}
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== 'GROKFIRST_FEED' || port.sender?.frameId !== 0 || !isFeed(port.sender?.url)) { port.disconnect(); return; }
-  const client = {port,tabId:port.sender.tab.id,pageUrl:port.sender.url,cancelEpoch:0,uiLanguage:null,requestCancellations:new Map()}; clients.add(client);
+  const client = {port,tabId:port.sender.tab.id,pageUrl:port.sender.url,cancelEpoch:0,uiLanguage:null,requestCancellations:new Map(),reusedAnswers:new Set()}; clients.add(client);
   ready.then(async()=>{client.uiLanguage=UI.normalizeLanguage(client.uiLanguage || uiLanguage);send(port,{type:'CONFIG',...await publicConfig(),used:quotas[client.tabId] || 0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});}).catch(()=>send(port,{type:'FATAL',error:'扩展初始化失败，请重新加载扩展。'}));
   port.onMessage.addListener(message=>{
     const receivedEpoch=client.cancelEpoch,receivedRevision=revision,receivedCredentialGeneration=securityGeneration,receivedBuildGeneration=buildConnectionGeneration,receivedOAuthGeneration=oauthGeneration;
@@ -788,7 +868,10 @@ chrome.runtime.onConnect.addListener(port => {
       const fingerprint=draft?null:comments?commentCacheKey(post,snapshot,inputFingerprint,analysis):cacheKey(post,snapshot,inputFingerprint);
       const ticket=draft?null:historyTicket(post,snapshot),historyLanguage=draft?'':Core.resolvePostLanguage(snapshot.language,post);
       const cached=draft||message.force ? null : cachedResult(fingerprint);
-      if(cached) { rememberHistoryResult(ticket,cached,comments,historyLanguage);send(port,comments?{type:'COMMENT_RESULT',requestId,comments:cached.comments,cached:true,...billingMetadata(cached,snapshot.provider)}:{type:'RESULT',requestId,result:withBillingMetadata(cached,snapshot.provider,snapshot.apiVerification),cached:true}); return; }
+      if(cached) {
+        // A reuse counts once per page, however often the post re-renders.
+        if(!client.reusedAnswers.has(fingerprint)){client.reusedAnswers.add(fingerprint);recordCacheReuse(cached,snapshot.provider);}
+        rememberHistoryResult(ticket,cached,comments,historyLanguage);send(port,comments?{type:'COMMENT_RESULT',requestId,comments:cached.comments,cached:true,...billingMetadata(cached,snapshot.provider)}:{type:'RESULT',requestId,result:withBillingMetadata(cached,snapshot.provider,snapshot.apiVerification),cached:true}); return; }
       // A free screen, or a saved Claude screen, stops an automatic check of a
       // post without a checkable claim before it costs anything.
       const skip=!comments&&!draft&&automaticSkip(post,snapshot,triggerKind);
@@ -1242,6 +1325,7 @@ function queueSecurityMutation(message) {
 }
 async function saveSettings(input) {
   const next=Core.normalizeSettings(input);
+  const retention=cacheRetention();
   if(JSON.stringify(next)!==JSON.stringify(settings)) {
     const modelChanged=next.apiModel!==settings.apiModel;
     const cancelsJobs=JSON.stringify(paidTaskSettings(next))!==JSON.stringify(paidTaskSettings(settings));
@@ -1264,13 +1348,15 @@ async function saveSettings(input) {
     if(modelChanged)await clearAPICapacityPause();
   }
   if(providerFault){providerFault=false;await chrome.storage.local.remove('invalidAnswerSource');}
+  const cacheStored=await applyCacheRetention(retention);
   await broadcastConfig();
+  return cacheStored;
 }
 function queueSettingsMutation(input) {
   const operation=securityWrites.catch(()=>{}).then(async()=>{
     await ready;
-    await saveSettings(typeof input==='function'?input():input);
-    return {ok:true};
+    const cacheStored=await saveSettings(typeof input==='function'?input():input);
+    return cacheStored?{ok:true}:{ok:false,errorKey:'options.cacheStorageError'};
   });
   securityWrites=operation;
   return operation;
@@ -1284,8 +1370,7 @@ async function saveClaudeKey(message){
     if(raw){const envelope=await ClaudeKeyStore.seal(raw);await chrome.storage.local.set({claudeApiKeyEncrypted:envelope});claudeKey=raw;}
     else{claudeKey='';await chrome.storage.local.remove('claudeApiKeyEncrypted');await ClaudeKeyStore.clear();}
   }catch{return {ok:false,errorKey:'claude.keyStorageError'};}
-  for(const key of Object.keys(cache)){try{if(JSON.parse(key)[1]==='claude')delete cache[key];}catch{delete cache[key];}}
-  cacheEpoch++;void persistCache(cacheEpoch).catch(()=>{});
+  void purgeCacheEntries(partition=>partition[1]==='claude').catch(()=>{});
   if(message.settings!==undefined)await saveSettings(mergeTriggerPreferences(Core.normalizeSettings(message.settings),message.triggerPreferencesChanged===false));
   else await broadcastConfig();
   pump();
@@ -1306,8 +1391,7 @@ async function handleOAuthMessage(message,actionGeneration){
   }else if(message.type==='OAUTH_CANCEL_LOGIN')state=await oauth.cancelLogin();
   else if(message.type==='OAUTH_LOGOUT'){
     state=await oauth.logout();
-    for(const key of Object.keys(cache)){try{if(JSON.parse(key)[1]==='oauth')delete cache[key];}catch{delete cache[key];}}
-    cacheEpoch++;await persistCache(cacheEpoch).catch(()=>{});
+    await purgeCacheEntries(partition=>partition[1]==='oauth').catch(()=>{});
   }else if(message.type==='OAUTH_SET_REMEMBER')state=await oauth.setRemember(message.remember);
   else if(message.type==='OAUTH_REFRESH_CATALOG')state=await oauth.catalog();
   if(state&&['OAUTH_LOGIN','OAUTH_START_LOGIN','OAUTH_SET_REMEMBER'].includes(message.type)&&typeof state.remember==='boolean'){
@@ -1395,10 +1479,17 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(message.type==='DELETE_HISTORY'&&!/^\d{1,25}$/.test(String(message.id||''))||message.type==='SET_HISTORY_ENABLED'&&typeof message.enabled!=='boolean')return {ok:false,errorKey:'history.storageError'};
       try{
         const result=await (message.type==='CLEAR_HISTORY'?history.clear():message.type==='DELETE_HISTORY'?history.delete(message.id):history.setEnabled(message.enabled));
+        if(message.type==='SET_HISTORY_ENABLED'){const retention=cacheRetention();historyEnabled=result.enabled;await applyCacheRetention(retention);}
         await broadcastHistoryConfig();return {ok:true,...scopedHistory(result)};
       }catch{return {ok:false,errorKey:'history.storageError'};}
     }
     if(message.type==='CLEAR_CACHE') { await clearStoredCache();return {ok:true}; }
+    if(message.type==='GET_CACHE_STATS')return {ok:true,...cacheStats,historyEnabled};
+    if(message.type==='RESET_CACHE_STATS'){
+      cacheStats={since:0,hits:0,tokens:0,usd:0};
+      try{await persistCacheStats();}catch{return {ok:false,errorKey:'options.cacheStorageError'};}
+      return {ok:true,...cacheStats,historyEnabled};
+    }
     if(message.type==='GET_CLAUDE_STATUS')return {ok:true,...claudeSpendSummary()};
     if(message.type==='SAVE_CLAUDE_KEY'||message.type==='CLEAR_CLAUDE_KEY'){
       const operation=securityWrites.catch(()=>{}).then(()=>saveClaudeKey(message.type==='CLEAR_CLAUDE_KEY'?{apiKey:''}:message));
@@ -1418,6 +1509,7 @@ chrome.alarms?.onAlarm.addListener(alarm=>{
   if(alarm.name===HISTORY_ALARM){
     void ready.then(()=>history.prune()).then(()=>notifyHistoryChanged()).catch(()=>{});
     void ready.then(()=>pruneStoredAPIDiagnostics()).catch(()=>{});
+    void ready.then(()=>pruneStoredCache()).catch(()=>{});
   }
 });
 chrome.runtime.onStartup?.addListener(()=>{void ready.then(()=>oauthReady).catch(()=>{});});

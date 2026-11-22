@@ -61,6 +61,24 @@
     $("claude-spend").textContent=claudeStatus.cycleEnd?ui.t(claudeStatus.budgetUsd>0?"claude.spend":"claude.spendNoLimit",uiLanguage,vars):"";
     $("claude-spend").dataset.state=claudeStatus.exhausted?"missing":"ready";
   }
+  // The reuse count is fetched only once Maintenance is opened.
+  let cacheStats=null;
+  function renderCacheStats(){
+    const line=$("cache-stats");
+    $("cache-history-off").hidden=cacheStats?.historyEnabled!==false||$("cache-retention").value==="session";
+    $("cache-stats-reset").hidden=!(cacheStats?.hits>0);
+    if(!cacheStats){line.textContent="";return;}
+    if(!cacheStats.hits){line.textContent=ui.t("options.cacheStatsEmpty",uiLanguage);return;}
+    const locale=uiLanguage==="auto"?undefined:uiLanguage;
+    const parts=[ui.t("options.cacheStats",uiLanguage,{hits:cacheStats.hits,date:new Date(cacheStats.since).toLocaleDateString(locale,{dateStyle:"medium"})})];
+    if(cacheStats.usd>=0.005)parts.push(ui.t("options.cacheSavedUsd",uiLanguage,{usd:cacheStats.usd.toFixed(2)}));
+    else if(cacheStats.tokens>0)parts.push(ui.t("options.cacheSavedTokens",uiLanguage,{tokens:new Intl.NumberFormat(locale,{notation:"compact"}).format(cacheStats.tokens)}));
+    line.textContent=parts.join(" · ");
+  }
+  async function refreshCacheStats(type="GET_CACHE_STATS"){
+    try{cacheStats=await send({type});}catch(error){if(type!=="GET_CACHE_STATS")setStatus("errors.operation","error",{error:error.message});}
+    renderCacheStats();
+  }
   async function refreshClaudeStatus(){
     try{const result=await send({type:"GET_CLAUDE_STATUS"});claudeStatus=result;}catch{/* Other connections remain usable. */}
     renderClaude();
@@ -329,6 +347,7 @@
       || $("x-search").checked !== currentSettings.xSearch
       || $("language").value !== currentSettings.language
       || $("interface-language").value !== currentSettings.interfaceLanguage
+      || $("cache-retention").value !== currentSettings.answerCacheRetention
       || promptFields.some(field => $(field.id).value !== currentSettings[field.setting]);
     if (changed) setStatus("options.unsavedChanges");
     else if (statusMessage?.key === "options.unsavedChanges") {
@@ -526,6 +545,7 @@
     renderSecurity();
     renderProvider();
     renderDiagnostics();
+    renderCacheStats();
     renderSearchFeedback();
     renderTriggers();
     for(const [id,error]of fieldErrors){if(error.errorId&&$(error.errorId))$(error.errorId).textContent=ui.t(error.key,uiLanguage,error.vars);}
@@ -547,6 +567,7 @@
     $("analysis-dwell").value = settings.dwellMs / 1000;
     $("web-search").checked = settings.webSearch;
     $("x-search").checked = settings.xSearch;
+    $("cache-retention").value = settings.answerCacheRetention;
     for (const field of promptFields) $(field.id).value = settings[field.setting];
     populateLanguages(settings.language);
     populateInterfaceLanguages(settings.interfaceLanguage);
@@ -647,7 +668,8 @@
   });
   $("interface-language").addEventListener("change",() => { renderLanguage();markDraft(); });
   $("api-model").addEventListener("change",() => { populateReasoning($("api-model").value,$("api-reasoning-effort").value);markDraft(); });
-  for (const id of ["build-reasoning-effort","api-reasoning-effort","api-concurrency","analysis-dwell","web-search","x-search","language",...promptFields.map(field => field.id)]) {
+  $("cache-retention").addEventListener("change",renderCacheStats);
+  for (const id of ["build-reasoning-effort","api-reasoning-effort","api-concurrency","analysis-dwell","web-search","x-search","language","cache-retention",...promptFields.map(field => field.id)]) {
     $(id).addEventListener("input",markDraft);
     $(id).addEventListener("change",markDraft);
   }
@@ -749,6 +771,7 @@
       xSearch:$("x-search").checked,
       language:$("language").value,
       interfaceLanguage:$("interface-language").value,
+      answerCacheRetention:$("cache-retention").value,
       verifyPrompt:$("verify-prompt").value,
       postDraftPrompt:$("post-draft-prompt").value,
       replyDraftPrompt:$("reply-draft-prompt").value,
@@ -864,6 +887,8 @@
     catch (error) { setStatus("errors.operation","error",{error:error.message}); }
     finally { setBusy(false); }
   });
+  $("cache-stats-reset").addEventListener("click",() => { if (!busy) void refreshCacheStats("RESET_CACHE_STATS"); });
+  $("maintenance").addEventListener("toggle",() => { if ($("maintenance").open && !cacheStats) void refreshCacheStats(); });
   $("diagnostics-summary").addEventListener("click",()=>{if(!$("api-diagnostics").open)void refreshDiagnostics();});
   $("diagnostics-refresh").addEventListener("click",()=>refreshDiagnostics());
   $("diagnostics-copy").addEventListener("click",async()=>{

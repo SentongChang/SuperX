@@ -1351,11 +1351,21 @@
     }
     else if(entry.statusKey)status(entry,entry.statusKey,entry.statusVars);
     if(entry.noteKey)entry.ui.note.textContent=t(entry.noteKey);
-    if(entry.cached)entry.ui.status.prepend(document.createTextNode(t('status.cached')+' · '));
+    if(entry.cached){const age=cachedAge(entry.result?.completedAt);entry.ui.status.prepend(document.createTextNode(t('status.cached')+(age?' · '+age:'')+' · '));}
     entry.ui.retry.disabled=!usableConnection()||!settings.enabled||['queued','running','retry-wait'].includes(entry.status)||wakeActions.has(wakeKey(entry,'analysis'));
     if(!providerReady)entry.ui.retry.hidden=true;
     else if(['done','error'].includes(entry.status))entry.ui.retry.hidden=false;
     refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);renderSources(entry);renderSkip(entry);syncPostControl(entry);
+  }
+  // A reused answer an hour old or more says how old it is: answers can be
+  // kept for days and a fact check goes stale with the news.
+  function cachedAge(completedAt) {
+    const age=Date.now()-completedAt;
+    if(!Number.isFinite(age)||age<60*60*1000)return '';
+    try{
+      const format=new Intl.RelativeTimeFormat(uiLanguage,{numeric:'auto',style:'short'}),hours=Math.floor(age/(60*60*1000));
+      return hours<24?format.format(-hours,'hour'):format.format(-Math.floor(hours/24),'day');
+    }catch{return '';}
   }
   function renderSkip(entry) {
     const ui=entry.ui,skipped=entry.status==='skipped';
@@ -1958,9 +1968,10 @@
     label.hidden=!entry.latestText&&!entry.comments.length&&!known;
     // Completed provenance belongs with the usage details rather than a
     // repeated heading. Keep progress, onboarding and incomplete/error states
-    // visible even when the row also owns a reported token subtotal.
+    // visible even when the row also owns a reported token subtotal, and keep
+    // the age of an older reused answer in view.
     const completedMetadata=entry.status==='done'&&['status.searched','status.unverified'].includes(entry.statusKey);
-    entry.ui.status.hidden=completedMetadata&&!label.hidden;
+    entry.ui.status.hidden=completedMetadata&&!label.hidden&&!(entry.cached&&cachedAge(entry.result?.completedAt));
     if(completedMetadata)lines.push(t(entry.statusKey));
     const route=entry.result?.claudeRoute?.reason;
     if(Core.TRIAGE_ROUTES.includes(route))lines.push(t('route.'+route));

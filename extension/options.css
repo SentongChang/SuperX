@@ -175,6 +175,12 @@ button:disabled, input:disabled, select:disabled, textarea:disabled { opacity: .
 .maintenance-action { padding: 20px 0; border-bottom: 1px solid var(--line); }
 .maintenance-action:first-child { padding-top: 0; }
 .maintenance-action h3 { margin: 0; font-size: 15px; line-height: 1.4; }
+.answer-cache .field { margin-top: 14px; }
+.cache-stats { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-top: 14px; }
+.cache-stats .help, .cache-stats .text-button { margin: 0; }
+.cache-stats .help:empty { display: none; }
+.cache-clear { margin-top: 18px; }
+.cache-clear .section-description { margin: 0; }
 .maintenance-content > .diagnostics-section { padding-top: 20px; }
 @media (prefers-color-scheme: light) {
   :root { color-scheme: light; background: #fff; color: #0f1419; --background: #fff; --foreground: #0f1419; --muted: #536471; --card-muted: #536471; --accent: #0072b1; --accent-hover: #00649b; --line: #eff3f4; --hover: #f7f9f9; --field-line: #89939b; --switch-thumb: #536471; --button-hover: #272c30; --error: #d01827; }

@@ -376,3 +376,21 @@ test('the Claude X-context line replaces the old search note in every language w
   }
   assert.doesNotMatch(ui.catalog.en['options.claude.xContext'],/verif/i);assert.match(ui.t('options.claude.xContext','zh-CN'),/社区笔记/);
 });
+
+test('answer cache settings ship in every interface language with the same placeholders',()=>{
+  const keys=['options.answerCacheTitle','options.cacheRetention','options.cacheRetentionSession','options.cacheRetention1d','options.cacheRetention7d','options.cacheRetentionHelp','options.cacheRetentionHistoryOff',
+    'options.cacheStatsEmpty','options.cacheStats','options.cacheSavedUsd','options.cacheSavedTokens','options.cacheStatsReset','options.cacheStorageError','options.cacheHelp'];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort();
+  for(const key of keys){
+    const english=ui.catalog.en[key];assert.ok(english?.trim(),key);
+    assert.doesNotMatch(english,/verif/i,key);
+    for(const language of ui.SUPPORTED_LANGUAGES){
+      const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+      if(language!=='en')assert.notEqual(value,english,`${language}: ${key}`);
+      assert.deepEqual(placeholders(value),placeholders(english),`${language}: ${key}`);
+      if(key==='options.cacheSavedUsd')assert.match(value,/\$\{usd\}/,`${language}: dollars keep the $ prefix`);
+    }
+  }
+  assert.equal(ui.t('options.cacheStats','en',{hits:12,date:'Nov 3, 2026'}),'Answers reused since Nov 3, 2026: 12');
+  assert.match(ui.t('options.cacheHelp','zh-CN'),/复用计数/);
+});

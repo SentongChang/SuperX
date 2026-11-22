@@ -201,3 +201,27 @@ test('Claude Settings offers Auto first, keeps Haiku as the default and nests th
  assert.equal(f.local.settings.claudeModel,'auto');assert.equal(f.local.settings.claudeAutoTrigger,true);assert.equal(f.local.settings.claudeTriage,false);
  autoTrigger.checked=false;autoTrigger.listeners.change();assert.equal(field.hidden,true);
 });
+
+test('Maintenance offers the answer cache period as a saved setting and loads the reuse count only when opened',async()=>{
+ const since=Date.UTC(2026,10,3,12);let stats={ok:true,since,hits:12,tokens:48200,usd:0.42,historyEnabled:true};
+ const f=fixture({override:message=>message.type==='GET_CACHE_STATS'?clone(stats):message.type==='RESET_CACHE_STATS'?(stats={ok:true,since:0,hits:0,tokens:0,usd:0,historyEnabled:true},clone(stats)):undefined});await settle();
+ const select=f.ids.get('cache-retention'),line=f.ids.get('cache-stats'),reset=f.ids.get('cache-stats-reset'),maintenance=f.ids.get('maintenance');
+ assert.equal(select.value,'1d');assert.equal(f.messages.some(message=>message.type==='GET_CACHE_STATS'),false,'Opening Settings sends nothing new');
+ select.value='7d';select.listeners.change();assert.equal(f.ids.get('status').textContent,UI.t('options.unsavedChanges','en'));
+ maintenance.open=true;maintenance.listeners.toggle();await settle();maintenance.listeners.toggle();await settle();
+ assert.equal(f.messages.filter(message=>message.type==='GET_CACHE_STATS').length,1);
+ const date=new Date(since).toLocaleDateString('en',{dateStyle:'medium'});
+ assert.equal(line.textContent,UI.t('options.cacheStats','en',{hits:12,date})+' · '+UI.t('options.cacheSavedUsd','en',{usd:'0.42'}));
+ assert.equal(line.textContent,'Answers reused since '+date+': 12 · about $0.42 saved');assert.equal(reset.hidden,false);assert.equal(f.ids.get('cache-history-off').hidden,true);
+ await reset.listeners.click();await settle();
+ assert.equal(f.messages.filter(message=>message.type==='RESET_CACHE_STATS').length,1);assert.equal(line.textContent,UI.t('options.cacheStatsEmpty','en'));assert.equal(reset.hidden,true);
+ await f.submit();assert.equal(f.messages.findLast(message=>message.type==='SAVE_SETTINGS').settings.answerCacheRetention,'7d');
+});
+
+test('the reuse count falls back to tokens below a cent and notes when history off keeps answers off disk',async()=>{
+ const f=fixture({override:message=>message.type==='GET_CACHE_STATS'?{ok:true,since:Date.UTC(2026,10,3),hits:3,tokens:48200,usd:0.001,historyEnabled:false}:undefined});await settle();
+ const maintenance=f.ids.get('maintenance'),select=f.ids.get('cache-retention'),note=f.ids.get('cache-history-off');
+ maintenance.open=true;maintenance.listeners.toggle();await settle();
+ assert.match(f.ids.get('cache-stats').textContent,/: 3 · about 48K tokens saved$/);
+ assert.equal(note.hidden,false);select.value='session';select.listeners.change();assert.equal(note.hidden,true,'Nothing to explain when the browser-session period is chosen');
+});

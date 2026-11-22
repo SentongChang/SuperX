@@ -438,6 +438,21 @@
       triage.signals.some(signal => signal === 'contested' || signal === 'high_stakes'));
     return hard ? {model:CLAUDE_HARD_MODEL, reason:'hard'} : {model:CLAUDE_BASE_MODEL, reason:'simple'};
   }
+  // How long finished answers are reused, measured from when each was made,
+  // never from its last use: a fact check goes stale with the news. Session
+  // answers stay in memory-backed storage; day periods persist on this device,
+  // within a bound that leaves room for history in the 10 MB local quota.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const CACHE_RETENTIONS = Object.freeze({
+    session: Object.freeze({ttlMs: DAY_MS, area: 'session', maxEntries: 160, maxBytes: 4_000_000}),
+    '1d': Object.freeze({ttlMs: DAY_MS, area: 'local', maxEntries: 120, maxBytes: 2_000_000}),
+    '7d': Object.freeze({ttlMs: 7 * DAY_MS, area: 'local', maxEntries: 120, maxBytes: 2_000_000})
+  });
+  // Turning browsing history off also keeps answers off disk.
+  function cacheRetention(settings, historyEnabled = true) {
+    const choice = historyEnabled === false ? 'session' : settings?.answerCacheRetention;
+    return Object.hasOwn(CACHE_RETENTIONS, choice) ? CACHE_RETENTIONS[choice] : CACHE_RETENTIONS['1d'];
+  }
   const DEFAULT_SETTINGS = Object.freeze({
     provider: 'oauth',
     enabled: true,
@@ -470,6 +485,7 @@
     apiVerification: 'only',
     webSearch: true,
     xSearch: true,
+    answerCacheRetention: '1d',
     explanationMode: 'preset',
     verifyPrompt: DEFAULT_PROMPTS.verify,
     postDraftPrompt: DEFAULT_PROMPTS.postDraft,
@@ -593,6 +609,7 @@
       apiVerification: 'only',
       webSearch: typeof value.webSearch === 'boolean' ? value.webSearch : DEFAULT_SETTINGS.webSearch,
       xSearch: typeof value.xSearch === 'boolean' ? value.xSearch : DEFAULT_SETTINGS.xSearch,
+      answerCacheRetention: Object.hasOwn(CACHE_RETENTIONS, value.answerCacheRetention) ? value.answerCacheRetention : DEFAULT_SETTINGS.answerCacheRetention,
       explanationMode: explanationMode(value),
       // A temporarily retired editor must not erase a user's existing draft.
       // This dormant field has no default and is never used by live requests.
@@ -1097,5 +1114,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });

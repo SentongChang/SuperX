@@ -51,7 +51,9 @@ function storage(initial = {}, hooks = {}) {
   };
 }
 function createBackground(options = {}) {
-  const local = storage({ settings: { ...core.DEFAULT_SETTINGS, provider: options.native ? 'native' : 'api', ...options.settings }, ...options.local }, { get: options.localGet, set: options.localSet, remove: options.localRemove });
+  // Most tests here were written against the browser-session answer cache and
+  // seed or inspect session 'cache'; the persisted default has its own tests.
+  const local = storage({ settings: { ...core.DEFAULT_SETTINGS, answerCacheRetention: 'session', provider: options.native ? 'native' : 'api', ...options.settings }, ...options.local }, { get: options.localGet, set: options.localSet, remove: options.localRemove });
   const keyStoreState=options.keyStoreState||keyStoreProfiles.get(options.local)||{key:null};
   keyStoreProfiles.set(local.data,keyStoreState);
   const keyStoreCalls=[];
@@ -1491,7 +1493,7 @@ test('0.6.1 API analysis caches regenerate naturally in every mode and fresh ans
   const oldVerify='Write only a concise fact-check section with its own heading, no more than six short sentences excluding citations. Do not repeat the earlier explanation. The earlier explanation is unverified and may be wrong; explicitly correct it if the evidence requires.';
   const input={...post(100),text:'The author recommends a useful new tool.',language:'en'};
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({provider:'api',explanationMode:mode,
+    const s=core.normalizeSettings({provider:'api',answerCacheRetention:'session',explanationMode:mode,
       explainPrompt:'User draft: explain the practical implications.',
       verifyPrompt:'User draft: check the central claim.'});
     const oldInput=mode==='url'?JSON.stringify(['url-input-v2',input.url,'en']):core.postFingerprint(input);
@@ -1525,7 +1527,7 @@ test('comments cached before explicit reasoning selection cannot substitute for 
   const analysis={text:'An existing explanation.',verificationStatus:'completed',warning:'',sources:[]};
   const comments=['A practical example would help.','Which step would you try first?','The workflow seems useful.'];
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({provider:'api',explanationMode:mode});
+    const s=core.normalizeSettings({provider:'api',answerCacheRetention:'session',explanationMode:mode});
     const oldPrompts=['comments-prompt-v1',s.commentsPrompt,...(mode==='url'?['url-display-language-v2']:[])];
     const oldKey=JSON.stringify(['GrokFirst-comments-v2-language','api',s.apiModel,s.language,core.postFingerprint(input),analysis,...oldPrompts]);
     const bg=createBackground({settings:s,cache:{[oldKey]:{completedAt:1800000000000,comments,provider:'api',task:'comments'}}});
@@ -1540,7 +1542,7 @@ test('comments cached before explicit reasoning selection cannot substitute for 
 test('0.6.2 excerpt-based caches cannot substitute for full-post answers in any API style',async()=>{
   const input={...post(100),text:'This is only the folded beginning of the post.',language:'en'};
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({explanationMode:mode,explainPrompt:'Retained user explanation.',verifyPrompt:'Retained user verification.'});
+    const s=core.normalizeSettings({answerCacheRetention:'session',explanationMode:mode,explainPrompt:'Retained user explanation.',verifyPrompt:'Retained user verification.'});
     const oldInput=mode==='url'?JSON.stringify(['url-input-v2',input.url,'en']):core.postFingerprint(input);
     const prompts=mode==='url'?[]:['prompts-v1',mode==='preset'?core.DEFAULT_PROMPTS.explain:s.explainPrompt,mode==='preset'?core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
     const oldKey=JSON.stringify(['GrokFirst-v1','api',s.apiModel,s.language,s.webSearch,s.xSearch,'api-v5-natural',mode,mode==='url'?'natural-url-v3-natural':s.apiVerification,oldInput,...prompts]);
@@ -1569,7 +1571,7 @@ test('0.6.4 API process narration caches regenerate in every mode and reader-fac
   const oldExplain='Explain what is interesting, confusing or missing in this post, adding only context that helps the reader understand it. Start directly with the useful explanation and keep it concise. Let the post determine the form; avoid a generic post-summary, classification checklist or disclaimer section.';
   const oldVerify='Check the specific claims that matter for understanding this post and add only useful findings or corrections. Keep the update concise, cite evidence beside the relevant finding, and place any necessary caveat beside its claim. Do not repeat the earlier explanation or add a stock fact-check or disclaimer section. The earlier explanation may be wrong; correct it when the evidence warrants.';
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({explanationMode:mode,language:'auto',
+    const s=core.normalizeSettings({answerCacheRetention:'session',explanationMode:mode,language:'auto',
       explainPrompt:'  Retain my custom explanation.\nUse a concise analogy.  ',
       verifyPrompt:' Retain my custom evidence task. '});
     const oldInput=JSON.stringify(['post-input-v3-full-url',input.url,'en']);
@@ -1745,7 +1747,7 @@ test('switching explanation style cancels the accepted old stream and ignores it
   const held=deferred(),bg=createBackground({settings:{explanationMode:'custom'},apiRun:async call=>{if(call.settings.explanationMode==='custom')await held.promise;return {text:call.settings.explanationMode+' result',provider:'api'};}});
   await bg.ready();const port=bg.connect();port.send({type:'ANALYZE',requestId:'url-in-flight',post:post(100)});
   await until(()=>bg.apiCalls.length===1);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',explanationMode:'preset'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',explanationMode:'preset'}});
   assert.equal(bg.apiCalls[0].signal.aborted,true);
   held.resolve();await tick();await tick();
   assert.equal(port.messages.some(value=>value.requestId==='url-in-flight'&&value.type==='RESULT'),false);
@@ -2447,7 +2449,7 @@ test('comment cache is distinct from explanations and changes with source eviden
   port.send({type:'SET_LANGUAGE',language:'ja'});
   await until(()=>port.messages.findLast(message=>message.type==='CONFIG')?.settings.language==='ja');
   assert.equal((await draftComments(bg,port,'japanese-drafts',100,{analysis:changed})).cached,false);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',language:'ja',apiModel:'custom-model'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',language:'ja',apiModel:'custom-model'}});
   assert.equal((await draftComments(bg,port,'custom-model-drafts',100,{analysis:changed})).cached,false);
   assert.equal(bg.commentCalls.length,5);
   assert.equal(bg.session.data.quotas[7],1);
@@ -3061,7 +3063,7 @@ test('reasoning levels partition both Fact Check and comment caches and restore 
     apiRun:async call=>({text:'Evidence at '+call.settings.apiReasoningEffort,provider:'api'}),
     commentRun:async call=>({comments:['First '+call.settings.apiReasoningEffort+'.','Second '+call.settings.apiReasoningEffort+'.','Third '+call.settings.apiReasoningEffort+'.'],provider:'api'})});
   await bg.ready();const port=bg.connect();
-  const settings=effort=>({...core.DEFAULT_SETTINGS,provider:'api',apiModel:'grok-4.7',apiReasoningEffort:effort});
+  const settings=effort=>({...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',apiModel:'grok-4.7',apiReasoningEffort:effort});
   for(const [index,effort] of ['low','high','low'].entries()){
     await bg.message({type:'SAVE_SETTINGS',settings:settings(effort)});
     const analysis=await analyze(bg,port,'effort-check-'+index),comments=await draftComments(bg,port,'effort-comments-'+index);
@@ -3078,7 +3080,7 @@ test('saving a reasoning-only change cancels old accepted work and new work uses
     if(call.settings.apiReasoningEffort==='low')await gate.promise;
     return{text:'Evidence at '+call.settings.apiReasoningEffort,provider:'api'};
   }});await bg.ready();const port=bg.connect();port.send({type:'ANALYZE',requestId:'effort-old',post:post(100)});await until(()=>bg.apiCalls.length===1);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',apiModel:'grok-4.7',apiReasoningEffort:'xhigh'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',apiModel:'grok-4.7',apiReasoningEffort:'xhigh'}});
   assert.equal(bg.apiCalls[0].signal.aborted,true);assert.equal(bg.local.data.settings.apiReasoningEffort,'xhigh');
   assert.equal((await analyze(bg,port,'effort-new')).result.text,'Evidence at xhigh');gate.resolve();await tick();await tick();
   assert.equal(port.messages.some(m=>m.requestId==='effort-old'&&m.type==='RESULT'),false);
@@ -4386,4 +4388,189 @@ test('a Claude answer is not reused once a Community Note appears, while Grok ke
     assert.equal(noted.cached === true, provider !== 'claude', provider);
     assert.equal((await analyze(bg, port, provider+'-noted-again', 100, {triggerKind:'manual',post:{...post(100),communityNote:{text:'Readers added context.',links:[]}}})).cached === true, true, provider);
   }
+});
+
+// Answer cache retention (WP5). These tests opt in to the persisted periods;
+// the harness otherwise pins the browser-session cache.
+const DAY=24*60*60*1000;
+const storedAnswer=(text,completedAt=1800000000000)=>({completedAt,text,provider:'api',verificationStatus:'completed'});
+const partitionKey=(provider,...rest)=>JSON.stringify(['GrokFirst-v1',provider,...rest]);
+const cacheWritesTo=writes=>values=>{if(Object.hasOwn(values,'answerCache'))writes.push(clone(values.answerCache));};
+
+test('the default 1 day cache persists answers on disk and serves them after a browser restart without a new call',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'}});await bg.ready();
+  assert.equal(core.normalizeSettings({}).answerCacheRetention,'1d');
+  const first=await analyze(bg,bg.connect(),'persisted-seed');assert.equal(first.cached,false);
+  await until(()=>Object.keys(bg.local.data.answerCache||{}).length===1,'local answer write');
+  assert.equal(bg.session.data.cache,undefined,'Day periods never keep a second copy in session storage');
+  const restarted=createBackground({local:bg.local.data,session:null});await restarted.ready();
+  const reused=await analyze(restarted,restarted.connect(),'persisted-reuse');
+  assert.equal(reused.cached,true);assert.equal(reused.result.text,first.result.text);assert.equal(restarted.apiCalls.length,0);
+});
+
+test('retention is measured from generation: 7 days reuses a 2 day old answer, 1 day drops a 25 hour old one from disk',async()=>{
+  const seed=createBackground({settings:{answerCacheRetention:'7d'}});await seed.ready();
+  await analyze(seed,seed.connect(),'week-seed');await until(()=>seed.local.data.answerCache);
+  const week=createBackground({local:seed.local.data,session:null,now:1800000000000+2*DAY});await week.ready();
+  assert.equal((await analyze(week,week.connect(),'week-reuse')).cached,true);assert.equal(week.apiCalls.length,0);
+  const day=createBackground({local:{...seed.local.data,settings:{...seed.local.data.settings,answerCacheRetention:'1d'}},now:1800000000000+25*60*60*1000});
+  await day.ready();assert.deepEqual(day.local.data.answerCache,{},'Startup removes the expired answer from disk');
+  assert.equal((await analyze(day,day.connect(),'day-expired')).cached,false);assert.equal(day.apiCalls.length,1);
+});
+
+test('choosing until the browser closes moves answers off disk without cancelling work, and a day period moves them back',async()=>{
+  const held=deferred();
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},apiRun:async call=>{if(call.post.id==='101')await held.promise;return {text:'Answer '+call.post.id,provider:'api',verificationStatus:'completed'};}});
+  await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'moved-answer');await until(()=>bg.local.data.answerCache);
+  port.send({type:'ANALYZE',requestId:'running-during-change',post:post(101)});await until(()=>bg.apiCalls.length===2);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'session'}})).ok,true);
+  assert.equal(bg.apiCalls[1].signal.aborted,false,'A retention change never cancels a running check');
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.keys(bg.session.data.cache).length,1);
+  held.resolve();await until(()=>Object.keys(bg.session.data.cache||{}).length===2,'running answer joins the session cache');
+  assert.equal((await analyze(bg,port,'session-reuse')).cached,true);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'7d'}})).ok,true);
+  assert.equal(Object.keys(bg.local.data.answerCache).length,2);assert.equal(Object.hasOwn(bg.session.data,'cache'),false);
+});
+
+test('shortening 7 days to 1 day removes older answers at once in memory and on disk',async()=>{
+  const recent=storedAnswer('Recent answer',1800000000000-60*60*1000),old=storedAnswer('Old answer',1800000000000-3*DAY);
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:{[partitionKey('api','recent')]:recent,[partitionKey('api','old')]:old}}});
+  await bg.ready();assert.equal(Object.keys(bg.local.data.answerCache).length,2);
+  await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'1d'}});
+  assert.deepEqual(bg.local.data.answerCache,{[partitionKey('api','recent')]:recent});
+});
+
+test('turning browsing history off keeps answers only until the browser closes, whatever the saved period',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'7d'}});await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'history-on');await until(()=>bg.local.data.answerCache);
+  await bg.message({type:'SET_HISTORY_ENABLED',enabled:false},{id:'grokfirst-test',url:'chrome-extension://grokfirst-test/history.html'});
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.keys(bg.session.data.cache).length,1);
+  assert.equal(bg.local.data.settings.answerCacheRetention,'7d','The saved choice is kept for when history is turned back on');
+  assert.equal((await analyze(bg,port,'history-off-reuse')).cached,true);
+  const worker=createBackground({local:bg.local.data,session:bg.session.data});await worker.ready();
+  assert.equal(Object.hasOwn(worker.local.data,'answerCache'),false);assert.equal(Object.keys(worker.session.data.cache).length,1);
+  await worker.message({type:'SET_HISTORY_ENABLED',enabled:true});
+  assert.equal(Object.keys(worker.local.data.answerCache).length,1);assert.equal(Object.hasOwn(worker.session.data,'cache'),false);
+});
+
+test('the legacy local cache key is still deleted unread and never reaches the persisted cache',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{cache:{[partitionKey('api','legacy')]:storedAnswer('PRIVATE_OLD_POST')}}});
+  await bg.ready();const port=bg.connect();assert.equal(Object.hasOwn(bg.local.data,'cache'),false);
+  await analyze(bg,port,'after-legacy');await until(()=>bg.local.data.answerCache);
+  assert.equal(JSON.stringify(bg.local.data.answerCache).includes('PRIVATE_OLD_POST'),false);
+  assert.equal(JSON.stringify(port.messages).includes('PRIVATE_OLD_POST'),false);
+});
+
+test('the persisted cache keeps the newest 120 answers within 2 MB',async()=>{
+  const many=Object.fromEntries(Array.from({length:130},(_,index)=>[partitionKey('api','answer-'+index),storedAnswer('Answer '+index,1800000000000-index*1000)]));
+  const counted=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:many}});await counted.ready();
+  const kept=Object.keys(counted.local.data.answerCache);
+  assert.equal(kept.length,120);assert.ok(kept.includes(partitionKey('api','answer-0')));assert.ok(kept.includes(partitionKey('api','answer-119')));assert.equal(kept.includes(partitionKey('api','answer-120')),false);
+  const large=Object.fromEntries(Array.from({length:40},(_,index)=>[partitionKey('api','large-'+index),storedAnswer('L'.repeat(100_000),1800000000000-index*1000)]));
+  const sized=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:large}});await sized.ready();
+  const retained=Object.keys(sized.local.data.answerCache);
+  assert.ok(retained.length>=15&&retained.length<20,String(retained.length));assert.ok(retained.includes(partitionKey('api','large-0')));
+  assert.ok(new TextEncoder().encode(JSON.stringify(sized.local.data.answerCache)).byteLength<=2_000_000);
+});
+
+test('clearing the answer cache removes every stored copy and keeps the reuse count',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{answerCacheStats:{since:1799000000000,hits:4,tokens:900,usd:0.5}},cache:{[partitionKey('api','session')]:storedAnswer('Session copy')}});
+  await bg.ready();await analyze(bg,bg.connect(),'clear-seed');await until(()=>Object.keys(bg.local.data.answerCache||{}).length===2);
+  assert.equal(Object.hasOwn(bg.session.data,'cache'),false,'Startup moves a session copy into the active area');
+  assert.equal((await bg.message({type:'CLEAR_CACHE'})).ok,true);
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.hasOwn(bg.session.data,'cache'),false);
+  assert.deepEqual(bg.local.data.answerCacheStats,{since:1799000000000,hits:4,tokens:900,usd:0.5});
+});
+
+test('an unremembered Grok login leaves no answers on disk for another account after a restart',async()=>{
+  const seed=createBackground({settings:{provider:'oauth',answerCacheRetention:'1d'},oauthState:oauthConnected(OAUTH_ACCOUNT_A),
+    apiRun:async()=>({provider:'oauth',text:'Account A evidence.',verificationStatus:'completed'})});
+  await seed.ready();await analyze(seed,seed.connect(),'account-a',930);await until(()=>seed.local.data.answerCache);
+  assert.ok(Object.keys(seed.local.data.answerCache)[0].includes(OAUTH_ACCOUNT_A));
+  const restarted=createBackground({local:seed.local.data,session:null});await restarted.ready();
+  await until(()=>Object.keys(restarted.local.data.answerCache).length===0,'signed-out purge');
+  restarted.oauthManager.change(oauthConnected(OAUTH_ACCOUNT_B));
+  const other=await analyze(restarted,restarted.connect(),'account-b',930);
+  assert.notEqual(other.cached,true);assert.equal(JSON.stringify(restarted.local.data.answerCache).includes('Account A evidence.'),false);
+});
+
+test('signing out, replacing a Claude Key and clearing a local connection also remove their answers from disk',async()=>{
+  const answerCache={[partitionKey('oauth',[OAUTH_ACCOUNT_A,'grok-4.3'])]:storedAnswer('OAuth'),[partitionKey('claude',['claude-messages-v2'])]:storedAnswer('Claude'),
+    [partitionKey('build',['official-ws-v1',2419,'grok-4.3'])]:storedAnswer('Build'),[partitionKey('api','grok-4.3')]:storedAnswer('API')};
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},oauthState:oauthConnected(OAUTH_ACCOUNT_A),local:{answerCache}});await bg.ready();
+  const providers=()=>Object.keys(bg.local.data.answerCache).map(key=>JSON.parse(key)[1]).sort();
+  assert.deepEqual(providers(),['api','build','claude','oauth']);
+  await bg.message({type:'OAUTH_LOGOUT'});await until(()=>!providers().includes('oauth'),'oauth purge');
+  await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-api03-background-fixture'});await until(()=>!providers().includes('claude'),'claude purge');
+  await bg.message({type:'CLEAR_BUILD_CONNECTION'});await until(()=>!providers().includes('build'),'build purge');
+  assert.deepEqual(providers(),['api']);
+});
+
+test('saving or clearing the API Key removes persisted answers from disk',async()=>{
+  for(const apiKey of ['replacement-api-key','']){
+    const bg=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:{[partitionKey('api','grok-4.3')]:storedAnswer('API answer')}}});await bg.ready();
+    assert.equal((await bg.message({type:'SAVE_KEY',apiKey,remember:false})).ok,true);
+    assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false,apiKey||'clear');
+  }
+});
+
+test('drafts and incomplete answers never reach the persisted cache',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},apiRun:async call=>call.post.kind==='draft'?{text:'PRIVATE_DRAFT_RESULT',provider:'api',verificationStatus:'completed'}:{text:'Partial evidence.',provider:'api',verificationStatus:'incomplete',verificationFailure:diagnosticFailure}});
+  await bg.ready();const port=bg.connect();
+  assert.equal((await checkPrivateDraft(bg,port,'draft:persisted',{id:'composer-persisted',text:'PRIVATE_DRAFT_TEXT'})).type,'RESULT');
+  assert.equal((await analyze(bg,port,'incomplete-persisted')).type,'RESULT');
+  await tick();assert.equal(bg.local.data.answerCache,undefined);assert.equal(bg.session.data.cache,undefined);
+});
+
+test('the reuse count records each served answer once per page with its tokens, and dollars only where tokens are billed',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},apiRun:async()=>({text:'Billed evidence.',provider:'api',verificationStatus:'completed',usage:{input_tokens:1000,output_tokens:200,total_tokens:1200,cost_in_usd_ticks:2e8}})});
+  await bg.ready();const port=bg.connect();const stats=async()=>{const {ok,...value}=await bg.message({type:'GET_CACHE_STATS'});return value;};
+  await analyze(bg,port,'stats-miss');assert.deepEqual(await stats(),{since:0,hits:0,tokens:0,usd:0,historyEnabled:true},'A miss is not counted');
+  assert.equal((await analyze(bg,port,'stats-hit')).cached,true);
+  assert.deepEqual(await stats(),{since:bg.now(),hits:1,tokens:1200,usd:0.02,historyEnabled:true});
+  await analyze(bg,port,'stats-rerender');
+  port.send({type:'LOOKUP_CACHED_POST',requestId:'stats-lookup',post:post(100)});await until(()=>port.messages.some(message=>message.requestId==='stats-lookup'));
+  assert.equal((await analyze(bg,port,'stats-force',100,{force:true})).cached,false);
+  assert.equal((await stats()).hits,1,'Re-renders, display lookups and rechecks are not reuse');
+  assert.equal((await analyze(bg,bg.connect(),'stats-new-page')).cached,true);assert.equal((await stats()).hits,2);
+  assert.deepEqual(bg.local.data.answerCacheStats,{since:1800000000000,hits:2,tokens:2400,usd:0.04});
+  const build=createBackground({settings:{provider:'build',answerCacheRetention:'1d'},buildRun:async()=>({text:'Local evidence.',provider:'build',searched:true,verificationStatus:'completed',usage:{total_tokens:300,cost_in_usd_ticks:2e8}})});
+  await build.ready();await build.configureBuild();const local=build.connect();await analyze(build,local,'build-miss');await analyze(build,local,'build-hit');
+  const {hits,tokens,usd}=await build.message({type:'GET_CACHE_STATS'});assert.deepEqual({hits,tokens,usd},{hits:1,tokens:300,usd:0});
+});
+
+test('the reuse count can be reset, survives restarts and never reaches X pages',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{answerCacheStats:{since:1799000000000,hits:3,tokens:4000,usd:0.12}}});await bg.ready();
+  const restarted=createBackground({local:bg.local.data,session:null});await restarted.ready();
+  assert.equal((await restarted.message({type:'GET_CACHE_STATS'})).hits,3);
+  const port=restarted.connect();await until(()=>port.messages.some(message=>message.type==='CONFIG'));
+  assert.equal(JSON.stringify(port.messages).includes('4000'),false);assert.equal(Object.hasOwn(await restarted.message({type:'GET_CONFIG'}),'cacheStats'),false);
+  assert.equal((await restarted.message({type:'GET_CACHE_STATS'},{id:'grokfirst-test',url:'https://x.com/home'})).ok,false,'Only extension pages may read the count');
+  const reset=await restarted.message({type:'RESET_CACHE_STATS'});
+  assert.deepEqual({hits:reset.hits,tokens:reset.tokens,usd:reset.usd},{hits:0,tokens:0,usd:0});
+  await until(()=>restarted.local.data.answerCacheStats?.hits===0);
+});
+
+test('the hourly cleanup removes an expired persisted answer without a provider call',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'}});await bg.ready();
+  await analyze(bg,bg.connect(),'hourly-seed');await until(()=>Object.keys(bg.local.data.answerCache||{}).length===1);
+  bg.advance(DAY);bg.chrome.alarms.onAlarm.emit({name:'SUPERX_HISTORY_CLEANUP'});
+  await until(()=>Object.keys(bg.local.data.answerCache).length===0,'hourly cache prune');assert.equal(bg.apiCalls.length,1);
+});
+
+test('answers finishing during a disk write are saved together in at most one more write',async()=>{
+  const writes=[],gate=deferred();let blocked=true;
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},localSet:async values=>{cacheWritesTo(writes)(values);if(Object.hasOwn(values,'answerCache')&&blocked){blocked=false;await gate.promise;}}});
+  await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'burst-1',101);await until(()=>writes.length===1);
+  await analyze(bg,port,'burst-2',102);await analyze(bg,port,'burst-3',103);await analyze(bg,port,'burst-4',104);
+  gate.resolve();await until(()=>writes.length===2);await tick();await tick();
+  assert.equal(writes.length,2);assert.equal(Object.keys(writes[1]).length,4);assert.equal(Object.keys(bg.local.data.answerCache).length,4);
+});
+
+test('troubleshooting logs keep their 24 hour lifetime whatever the answer retention',async()=>{
+  const entry=age=>({recordedAt:1800000000000-age,code:'API_ERROR',requestDiagnostics:safeRequestDiagnostics});
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},session:{apiRequestDiagnostics:[entry(60*60*1000),entry(25*60*60*1000)]}});await bg.ready();
+  const log=await readDiagnostics(bg);assert.equal(log.retentionHours,24);assert.deepEqual(log.entries.map(value=>value.recordedAt),[1800000000000-60*60*1000]);
 });

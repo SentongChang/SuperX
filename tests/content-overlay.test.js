@@ -4829,3 +4829,14 @@ test('a kept partial answer shows its source mix, and an answer without sources 
   other.page.port.onMessage.emit({type:'RESULT',requestId:other.request.requestId,result:{provider:'api',text:'From memory only.',sources:[]}});other.page.flush();
   assert.equal(other.card.testShadow.querySelector('.sources').childNodes.length,0);
 });
+
+test('a reused answer an hour old or more keeps its age in view beside the cached label',()=>{
+  const day=24*60*60*1000,cases=[[3*day,new Intl.RelativeTimeFormat('zh-CN',{numeric:'auto',style:'short'}).format(-3,'day')],[5*60*60*1000,new Intl.RelativeTimeFormat('zh-CN',{numeric:'auto',style:'short'}).format(-5,'hour')],[10*60*1000,'']];
+  for(const [age,label] of cases){
+    const {page,request,card}=tokenFixture();
+    page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,cached:true,result:{provider:'api',text:'Earlier evidence.',sources:[],searched:true,verificationStatus:'completed',usage:{total_tokens:9},completedAt:1800000000000-age}});page.flush();
+    const status=card.testShadow.querySelector('.status');
+    assert.equal(status.textContent,ui.t('status.cached','zh-CN')+' · '+(label?label+' · ':'')+ui.t('status.searched','zh-CN'),String(age));
+    assert.equal(status.hidden,!label,'A recent reuse leaves its provenance to the usage details');
+  }
+});
