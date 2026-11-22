@@ -138,7 +138,7 @@ async function start(page,scene,scheme,width,locale='en',boundary='separator',se
   await page.goto(base+`/${scene.startsWith('reply')?'Fixture/status/1956376225074552934':'home'}?scene=${scene}&scheme=${scheme}&boundary=${boundary}`);
   if(setup)await setup(page);
   await page.evaluate(()=>{const editor=document.querySelector('[contenteditable]'),publish=document.querySelector('.publish'),rect=node=>{const bounds=node.getBoundingClientRect();return {width:bounds.width,height:bounds.height};};qa.nativeBeforeInjection={editor:rect(editor),publish:rect(publish)};});
-  for(const file of ['x-dom.js','feed-core.js','ui-i18n.js','marked.umd.js','markdown-renderer.js','draft-composer.js'])await page.addScriptTag({url:base+'/extension/'+file});
+  for(const file of ['x-dom.js','provider-registry.js','source-quality.js','feed-core.js','ui-i18n.js','marked.umd.js','markdown-renderer.js','draft-composer.js'])await page.addScriptTag({url:base+'/extension/'+file});
   await page.evaluate(locale=>{
     qa.captureGeometry=()=>{
       const rect=node=>{if(!node)return null;const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom};};
@@ -160,7 +160,7 @@ async function start(page,scene,scheme,width,locale='en',boundary='separator',se
 }
 async function startIntegrated(page,{config=true,oauth=false}={}){
   await page.goto(base+'/home?scene=new-inline&scheme=dark');
-  for(const file of ['x-dom.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js'])await page.addScriptTag({url:base+'/extension/'+file});
+  for(const file of ['x-dom.js','provider-registry.js','source-quality.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js'])await page.addScriptTag({url:base+'/extension/'+file});
   await page.evaluate(({config,oauth,base})=>{
     const event=()=>{const listeners=[];return {addListener:fn=>listeners.push(fn),removeListener:fn=>{const i=listeners.indexOf(fn);if(i>=0)listeners.splice(i,1);},emit:value=>listeners.slice().forEach(fn=>fn(value))};};
     qa.config={settings:{...XGrokCore.DEFAULT_SETTINGS,provider:oauth?'oauth':'api',enabled:false,interfaceLanguage:'en'},ready:!oauth,historyEnabled:false,historyEpoch:0,taskRevision:7,credentialIdentity:oauth?'':'account-1',oauthStatus:oauth?{state:'restoring',connected:false}:undefined,used:0,collapsed:true,uiLanguage:'en'};
@@ -1150,6 +1150,13 @@ try{
   await edgePage.evaluate(()=>{const attachment=document.createElement('div');attachment.dataset.testid='attachments';attachment.style.cssText='height:60px;width:120px';attachment.textContent='Local draft attachment preview';document.querySelector('.composer .editor-row').after(attachment);qa.manager.scan();});await settle(edgePage);
   check('text boundaries: draft attachment preview shows accurate text-only notice',await edgePage.locator('superx-draft-panel .text-only').isVisible()&&(await edgePage.locator('superx-draft-panel .text-only').innerText()).includes('attachments are not included'));
   check('text boundaries: adding draft attachment never automatically sends content',await edgePage.evaluate(()=>qa.sent.filter(item=>item.type==='ANALYZE_DRAFT').length===1));
+  await emit(edgePage,{type:'UPDATE',requestId:emojiRequest.requestId,phase:'verify',text:'The moon claim needs a source.',verdict:'unproven'});await settle(edgePage);
+  const streamedVerdict=await edgePage.locator('superx-draft-panel .verdict').evaluate(node=>({hidden:node.hidden,text:node.textContent}));
+  check('verdict row: a streamed draft verdict shows before its gaps',!streamedVerdict.hidden&&streamedVerdict.text==='Not enough evidence',streamedVerdict);
+  await emit(edgePage,{type:'RESULT',requestId:emojiRequest.requestId,result:{text:'The moon claim needs a source.',verdict:'unproven',gaps:['media','search'],model:'grok-4.3'}});await settle(edgePage);
+  const draftVerdict=await edgePage.locator('superx-draft-panel').evaluate(node=>{const root=node.shadowRoot,row=root.querySelector('.verdict'),answer=root.querySelector('.answer');
+    return {text:row.textContent,verdict:row.dataset.verdict,aria:row.getAttribute('aria-label'),aboveAnswer:row.nextElementSibling===answer,title:row.querySelector('.verdict-gaps span')?.title,dot:getComputedStyle(row.querySelector('.verdict-dot')).backgroundColor};});
+  check('verdict row: the draft result shows its verdict and unsent attachments above the answer',draftVerdict.text==='Not enough evidencePartial check · Images not read · No search'&&draftVerdict.verdict==='unproven'&&draftVerdict.aboveAnswer&&draftVerdict.title==='At least one image was not available to the model.'&&draftVerdict.dot==='rgba(0, 0, 0, 0)',draftVerdict);
   await edgePage.screenshot({path:path.join(output,'emoji-parent-and-draft-media.png'),fullPage:true});report.screenshots.push('emoji-parent-and-draft-media.png');
   await edgeContext.close();
   const integration=await browser.newContext({viewport:{width:1300,height:1000}});

@@ -341,3 +341,83 @@ test('draft search tooltip describes call records without claiming retrieval suc
   assert.equal(ui.t('draft.searchEvidenceNote','zh-CN'),'有调用记录不代表已取得有效证据或结论一定正确。');
   for(const retired of ['draft.searchConfirmed','draft.searchNotObserved','draft.searchUnknown'])assert.equal(Object.hasOwn(ui.catalog.en,retired),false);
 });
+
+test('verdict and gap labels exist in every language with matching placeholders and no English "verify" wording',()=>{
+  const keys=[...core.VERDICTS.map(verdict=>'verdict.'+verdict),'verdict.aria','gaps.label','gaps.aria',...core.CHECK_GAPS.flatMap(gap=>['gaps.'+gap,'gaps.'+gap+'Title'])];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]);
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.deepEqual(placeholders(value),placeholders(ui.catalog.en[key]),`${language}: ${key} placeholders`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  assert.deepEqual(placeholders(ui.catalog.en['verdict.aria']),['verdict']);assert.deepEqual(placeholders(ui.catalog.en['gaps.aria']),['gaps']);
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('verdict.unproven','en'),'Not enough evidence');assert.equal(ui.t('gaps.label','zh-CN'),'核查不完整');
+});
+
+test('source-quality labels exist in every language with the {list} placeholder and no English "verify" wording',()=>{
+  const sources=require('../extension/source-quality.js');
+  const keys=['source.summary',...sources.TIERS.map(tier=>'source.'+tier),'source.weak','source.hint'];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]);
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.deepEqual(placeholders(value),key==='source.summary'?['list']:[],`${language}: ${key} placeholders`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('source.summary','fr',{list:'Presse 1'}),'Sources : Presse 1');assert.equal(ui.t('source.social','zh-CN'),'社交媒体');
+});
+
+test('the Claude X-context line replaces the old search note in every language without "verify" wording',()=>{
+  for(const language of ui.SUPPORTED_LANGUAGES){
+    const value=ui.catalog[language]['options.claude.xContext'];assert.ok(value?.trim(),language);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en['options.claude.xContext'],language);
+    assert.equal(Object.hasOwn(ui.catalog[language],'claude.searchNote'),false,language);
+  }
+  assert.doesNotMatch(ui.catalog.en['options.claude.xContext'],/verif/i);assert.match(ui.t('options.claude.xContext','zh-CN'),/社区笔记/);
+});
+
+test('answer cache settings ship in every interface language with the same placeholders',()=>{
+  const keys=['options.answerCacheTitle','options.cacheRetention','options.cacheRetentionSession','options.cacheRetention1d','options.cacheRetention7d','options.cacheRetentionHelp','options.cacheRetentionHistoryOff',
+    'options.cacheStatsEmpty','options.cacheStats','options.cacheSavedUsd','options.cacheSavedTokens','options.cacheStatsReset','options.cacheStorageError','options.cacheHelp'];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort();
+  for(const key of keys){
+    const english=ui.catalog.en[key];assert.ok(english?.trim(),key);
+    assert.doesNotMatch(english,/verif/i,key);
+    for(const language of ui.SUPPORTED_LANGUAGES){
+      const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+      if(language!=='en')assert.notEqual(value,english,`${language}: ${key}`);
+      assert.deepEqual(placeholders(value),placeholders(english),`${language}: ${key}`);
+      if(key==='options.cacheSavedUsd')assert.match(value,/\$\{usd\}/,`${language}: dollars keep the $ prefix`);
+    }
+  }
+  assert.equal(ui.t('options.cacheStats','en',{hits:12,date:'Nov 3, 2026'}),'Answers reused since Nov 3, 2026: 12');
+  assert.match(ui.t('options.cacheHelp','zh-CN'),/复用计数/);
+});
+
+test('layout self-check copy ships in every interface language without placeholders or "verify" wording',()=>{
+  const keys=['layout.title','layout.posts','layout.actions','layout.report','layout.dismiss','layout.popup'];
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.doesNotMatch(value,/\{\w+\}/,`${language}: ${key}`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('layout.title','en'),"SuperX can't read this X layout");assert.equal(ui.t('layout.report','zh-CN'),'报告问题');
+});
+
+test('onboarding copy ships in every interface language with matching placeholders and no "verify" wording',()=>{
+  const keys=[...Object.keys(ui.catalog.en).filter(key=>key.startsWith('onboarding.')),'trigger.clickOnlyStatus'];
+  assert.equal(keys.length,33);
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort();
+  for(const key of keys){
+    const english=ui.catalog.en[key];assert.doesNotMatch(english,/verif/i,key);assert.doesNotMatch(english,/\bkey\b/,`${key}: Key is capitalised`);
+    for(const language of ui.SUPPORTED_LANGUAGES){
+      const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+      if(language!=='en')assert.notEqual(value,english,`${language}: ${key}`);
+      assert.deepEqual(placeholders(value),placeholders(english),`${language}: ${key}`);
+    }
+  }
+  assert.deepEqual(placeholders(ui.catalog.en['onboarding.progress']),['step']);assert.deepEqual(placeholders(ui.catalog.en['onboarding.keyPrivacy']),['host']);
+  assert.equal(ui.t('onboarding.progress','zh-CN',{step:2}),'第 2 步，共 3 步');assert.equal(ui.t('trigger.clickOnlyStatus','zh-CN'),'点击即核查');
+});

@@ -101,6 +101,28 @@
       hasClass(last, 'max-w-full') && hasClass(last, 'text-brand') && hasClass(last, 'hover:underline') ? [last] : [];
   }
 
+  function lineClamped(node) {
+    const style = styleFor(node);
+    const inline = attr(node, 'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
+    const clamp = Number(style.webkitLineClamp || style.getPropertyValue?.('-webkit-line-clamp') || style.lineClamp || inline);
+    return clamp > 0 && Number(node.clientHeight) > 0 && Number(node.scrollHeight) > Number(node.clientHeight) + 1;
+  }
+
+  // The checked post's own body is cut short: X's inline expander, the legacy
+  // Show more link, or a line clamp that hides overflow. Quoted posts never
+  // count; the legacy timeline wraps them in a role=link card, not an article.
+  function mainTextTruncated(article) {
+    const legacy = attr(article, 'data-testid') === 'tweet';
+    const quoted = node => {
+      for (let current = node.parentElement; legacy && current && current !== article; current = current.parentElement) {
+        if (tag(current) !== 'a' && attr(current, 'role') === 'link') return true;
+      }
+      return false;
+    };
+    return all(article, '[data-testid="tweet-text-show-more-link"]').some(node => owns(node, article) && !quoted(node)) ||
+      bodyNodes(article).some(body => !quoted(body) && (bodyExpanders(body).length > 0 || lineClamped(body)));
+  }
+
   function authorNode(scope) {
     const legacy = all(scope, '[data-testid="User-Name"]').find(node => owns(node, scope));
     if (legacy) return legacy;
@@ -319,6 +341,62 @@
     return {anchor, reference, header, peer:grok ? more : null};
   }
 
+  // Page kinds that list posts SuperX promises to read. Anything else, such as
+  // messages, settings, notifications or a profile's media tab, is 'other'.
+  const reservedPaths = new Set(['home', 'explore', 'notifications', 'messages', 'settings', 'i', 'compose', 'search',
+    'login', 'logout', 'signup', 'tos', 'privacy', 'jobs', 'premium']);
+  function routeKind(value) {
+    let url;
+    try { url = new URL(value, 'https://x.com'); } catch (_) { return 'other'; }
+    if (!/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(url.hostname)) return 'other';
+    const path = url.pathname.replace(/\/+$/, '');
+    if (path === '/home') return 'home';
+    // The Media tab is a thumbnail grid, not a list of posts.
+    if (path === '/search') return url.searchParams.get('f') === 'media' ? 'other' : 'search';
+    if (path === '/i/bookmarks') return 'bookmarks';
+    if (/^\/i\/lists\/\d+$/.test(path)) return 'list';
+    if (/^\/[A-Za-z0-9_]{1,15}\/status\/\d+$/.test(path)) return 'status';
+    const profile = path.match(/^\/([A-Za-z0-9_]{1,15})(?:\/with_replies)?$/);
+    return profile && !reservedPaths.has(profile[1].toLowerCase()) ? 'profile' : 'other';
+  }
+
+  const ownNode = node => /^(?:superx-|grok-first-)/.test(tag(node));
+  function outside(node, excluded) {
+    for (let current = node; current; current = current.parentElement) if (excluded(current)) return false;
+    return true;
+  }
+
+  function signedOut(doc) {
+    return all(doc, 'a[href="/login"], a[href^="/i/flow/login"], a[href^="/i/flow/signup"], [data-testid="loginButton"], [data-testid="signupButton"]')
+      .some(node => visible(node) && outside(node, ownNode));
+  }
+
+  // A cheap structural census for the layout self-check. Status permalinks are
+  // the evidence that X shows posts; it is independent of how SuperX finds
+  // articles, so a page SuperX cannot read still has a measurable post count.
+  // Only a bare /<handle>/status/<id> counts: media grids link every thumbnail
+  // to /photo/1 or /video/1 without showing any post.
+  const probeLimits = Object.freeze({links:50, articles:20});
+  function permalinkID(href) {
+    if (!canonicalPostURL(href)) return '';
+    return new URL(href, 'https://x.com').pathname.match(/^\/[A-Za-z0-9_]{1,15}\/status\/(\d+)\/?$/)?.[1] || '';
+  }
+  function layoutProbe(doc) {
+    const nonContent = node => ownNode(node) || tag(node) === 'aside' || tag(node) === 'nav' || attr(node, 'role') === 'banner';
+    const mains = all(doc, 'main, [role="main"]').filter(node => visible(node) && !inDialog(node));
+    const scopes = mains.length ? mains : [doc?.body].filter(Boolean);
+    const ids = new Set();
+    for (const scope of scopes) for (const anchor of all(scope, 'a[href]')) {
+      if (ids.size >= probeLimits.links) break;
+      const id = permalinkID(attr(anchor, 'href'));
+      if (id && !ids.has(id) && visible(anchor) && !inDialog(anchor) && outside(anchor, nonContent)) ids.add(id);
+    }
+    const sample = articles(doc).slice(0, probeLimits.articles).filter(article => postURL(article));
+    return {route:routeKind(doc?.location?.href || ''), signedOut:signedOut(doc), evidence:ids.size,
+      readable:sample.length, withControls:sample.filter(article => controls(article)).length};
+  }
+
   return Object.freeze({editorSelector, isEditor, form, primary, sidebar, articles, isModern, shell, row,
-    postURL, bodyNodes, bodyExpanders, authorNode, quoteRoots, owns, pageHeader, controls});
+    postURL, bodyNodes, bodyExpanders, lineClamped, mainTextTruncated, authorNode, quoteRoots, owns, pageHeader, controls,
+    routeKind, signedOut, layoutProbe});
 });

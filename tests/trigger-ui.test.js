@@ -2,14 +2,14 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const Core=require('../extension/feed-core.js'),UI=require('../extension/ui-i18n.js');
 
-function popupFixture({provider='oauth',ready=false,mode='automatic',failure=false,language='en',customTriggers}={}){
+function popupFixture({provider='oauth',ready=false,mode='automatic',failure=false,language='en',customTriggers,layoutHealth}={}){
   const elements=new Map(),storageListeners=[],runtimeListeners=[],messages=[];
   const html=fs.readFileSync(path.join(__dirname,'../extension/popup.html'),'utf8');
   for(const match of html.matchAll(/<[a-z][^>]*\bid="([^"]+)"[^>]*>/g))elements.set(match[1],{checked:false,disabled:false,hidden:false,dataset:{},textContent:'',listeners:{},addEventListener(type,fn){this.listeners[type]=fn;}});
   const document={documentElement:{},getElementById:id=>elements.get(id),querySelectorAll:()=>[]};
   let settings=Core.normalizeSettings({...Core.DEFAULT_SETTINGS,provider,triggerMode:mode,customTriggers:customTriggers||{...Core.DEFAULT_SETTINGS.customTriggers,postHover:true,postHoverMs:2700},language:'ja'});
-  const config=()=>({ok:true,settings,ready,keyState:'missing',oauthStatus:{state:'disconnected',connected:false},buildStatus:{errorCode:'BUILD_NOT_CONNECTED'}});
-  const chrome={runtime:{onMessage:{addListener:fn=>runtimeListeners.push(fn)},async sendMessage(message){
+  const config=()=>({ok:true,settings,ready,keyState:'missing',oauthStatus:{state:'disconnected',connected:false},buildStatus:{errorCode:'BUILD_NOT_CONNECTED'},...(layoutHealth?{layoutHealth}:{})});
+  const chrome={runtime:{getManifest:()=>({version:'1.1.6'}),onMessage:{addListener:fn=>runtimeListeners.push(fn)},async sendMessage(message){
     messages.push(message);
     if(message.type==='GET_UI_LANGUAGE')return {ok:true,language};
     if(message.type==='GET_CONFIG')return config();
@@ -20,7 +20,7 @@ function popupFixture({provider='oauth',ready=false,mode='automatic',failure=fal
     if(['OPEN_SETTINGS','OPEN_HISTORY'].includes(message.type))return {ok:true};
     throw Error('Unexpected message '+message.type);
   }},storage:{local:{async get(){return {uiLanguage:language};}},onChanged:{addListener:fn=>storageListeners.push(fn)}}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/popup.js'),'utf8'),{XGrokCore:Core,GrokFirstUI:UI,document,chrome,navigator:{language},console});
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/popup.js'),'utf8'),{XGrokCore:Core,GrokFirstUI:UI,document,chrome,navigator:{language,userAgent:'Mozilla/5.0 Chrome/131.0.0.0'},console});
   return {elements,messages,document,settings:()=>settings,emitConfig(value){settings=Core.normalizeSettings({...settings,...value});runtimeListeners.forEach(fn=>fn({...config(),type:'CONFIG'}));},choose(mode){for(const name of ['automatic','custom','paused'])elements.get('trigger-mode-'+name).checked=name===mode;elements.get('trigger-mode-'+mode).listeners.change();}};
 }
 const settle=async()=>{for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));};
@@ -62,7 +62,7 @@ test('a failed popup mode save restores the prior selected state and exposes the
 
 test('every supported language has the complete trigger settings and interaction vocabulary',()=>{
   const keys=Object.keys(UI.catalog.en).filter(key=>key.startsWith('trigger.'));
-  assert.equal(keys.length,27);
+  assert.equal(keys.length,28);
   for(const language of UI.SUPPORTED_LANGUAGES)for(const key of keys){assert.ok(Object.hasOwn(UI.catalog[language],key),language+': '+key);assert.ok(UI.t(key,language).trim());assert.notEqual(UI.t(key,language),key);}
   assert.equal(UI.t('trigger.paused','en'),'Pause');
   assert.equal(UI.t('trigger.pausedStatus','en'),'Post fact-checking paused');
@@ -113,4 +113,63 @@ test('every supported language translates the compact popup summary',()=>{
     assert.ok(Object.hasOwn(UI.catalog[language],key),language+': '+key);
     const value=UI.t(key,language,{seconds:'1.5'});assert.notEqual(value,key);assert.ok(value.trim());assert.doesNotMatch(value,/\{seconds\}/);
   }
+});
+
+// Golden characterization for the provider registry (WP7-P0): popup label,
+// hint, not-ready reason and Settings focus per provider, recorded before the
+// registry existed.
+test('golden: popup provider label, automatic hint, blocked reason and Settings focus per provider',async()=>{
+  const expected={
+    api:{label:['popup.apiLabel',{count:3}],hint:UI.t('popup.apiHint','en'),blocked:'status.needsKey',focus:'api-key'},
+    oauth:{label:['popup.oauthLabel',{count:3}],hint:UI.t('popup.oauthHint','en'),blocked:'oauth.needsLogin',focus:'oauth'},
+    build:{label:['popup.buildLabel',{transport:'ACP'}],hint:UI.t('popup.buildHint','en'),blocked:'build.missing',focus:'build'},
+    claude:{label:['claude.modeLabel',{count:3}],hint:UI.t('claude.popupHint','en'),blocked:'status.needsKey',focus:'claude'}
+  };
+  for(const [provider,{label,hint,blocked,focus}] of Object.entries(expected)){
+    const offline=popupFixture({provider});await settle();
+    assert.equal(offline.elements.get('enabled-label').textContent,UI.t(blocked,'en'),provider);
+    const p=popupFixture({provider,ready:true});await settle();
+    assert.equal(p.elements.get('provider-label').textContent,UI.t(label[0],'en',label[1]),provider);
+    assert.equal(p.elements.get('provider-hint').hidden,false,provider);
+    assert.equal(p.elements.get('provider-hint').textContent,hint,provider);
+    p.elements.get('options').listeners.click();await settle();
+    assert.equal(p.messages.findLast(message=>message.type==='OPEN_SETTINGS').focus,focus,provider);
+  }
+});
+
+test('the popup shows one layout line with a report link only while the active tab is unreadable',async()=>{
+  const healthy=popupFixture({ready:true});await settle();
+  assert.equal(healthy.elements.get('layout-notice').hidden,true);
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const p=popupFixture({ready:true,layoutHealth:report});await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,false);
+  const link=new URL(p.elements.get('layout-report').href);
+  assert.equal(link.origin+link.pathname,'https://github.com/bwjoke/SuperX/issues/new');
+  assert.match(link.searchParams.get('body'),/SuperX version: 1\.1\.6\nBrowser: Chrome 131\nPage: home\nFailure: posts/);
+  p.emitConfig({});await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,false,'A broadcast snapshot keeps the tab state');
+  p.choose('paused');await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,true,'Nothing is reported while paused');
+  assert.equal(p.messages.some(message=>/LAYOUT/.test(message.type)),false);
+});
+
+test('the popup offers the setup guide only while not connected, below a layout notice in priority',async()=>{
+  const notReady=popupFixture({ready:false});await settle();
+  assert.equal(notReady.elements.get('setup-notice').hidden,false);
+  const ready=popupFixture({ready:true});await settle();
+  assert.equal(ready.elements.get('setup-notice').hidden,true);
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const broken=popupFixture({ready:false,layoutHealth:report});await settle();
+  assert.equal(broken.elements.get('layout-notice').hidden,false);assert.equal(broken.elements.get('setup-notice').hidden,true,'one notice line at most');
+  assert.match(fs.readFileSync(path.join(__dirname,'../extension/popup.html'),'utf8'),/<a id="setup-guide" href="onboarding.html" target="_blank" data-i18n="onboarding.reopen">/);
+  assert.equal(notReady.messages.some(message=>!['GET_UI_LANGUAGE','GET_CONFIG'].includes(message.type)),false);
+});
+
+test('a click-only custom setup reads as fact-check on click in the popup',async()=>{
+  const clickOnly=popupFixture({provider:'api',ready:true,mode:'custom',customTriggers:{...Core.DEFAULT_CUSTOM_TRIGGERS,...Core.CLICK_ONLY_TRIGGERS}});await settle();
+  assert.equal(clickOnly.elements.get('enabled-label').textContent,UI.t('trigger.clickOnlyStatus','en'));
+  const custom=popupFixture({provider:'api',ready:true,mode:'custom',customTriggers:Core.DEFAULT_CUSTOM_TRIGGERS});await settle();
+  assert.equal(custom.elements.get('enabled-label').textContent,UI.t('trigger.customStatus','en'));
+  const notReady=popupFixture({provider:'api',ready:false,mode:'custom',customTriggers:{...Core.DEFAULT_CUSTOM_TRIGGERS,...Core.CLICK_ONLY_TRIGGERS}});await settle();
+  assert.equal(notReady.elements.get('enabled-label').textContent,UI.t('status.needsKey','en'),'a missing connection still wins');
 });

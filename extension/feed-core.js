@@ -1,10 +1,13 @@
 (function (root, factory) {
   'use strict';
-  const dom = root?.SuperXXDOM || (typeof module === 'object' && module.exports ? require('./x-dom.js') : undefined);
-  const core = factory(dom);
-  if (typeof module === 'object' && module.exports) module.exports = core;
+  const node = typeof module === 'object' && module.exports;
+  const dom = root?.SuperXXDOM || (node ? require('./x-dom.js') : undefined);
+  const providers = root?.SuperXProviders || (node ? require('./provider-registry.js') : undefined);
+  const sources = root?.SuperXSourceQuality || (node ? require('./source-quality.js') : undefined);
+  const core = factory(dom, providers, sources);
+  if (node) module.exports = core;
   if (root) root.XGrokCore = core;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM, Providers, Sources) {
   'use strict';
 
   const LANGUAGES = Object.freeze([
@@ -29,6 +32,32 @@
     {value:'grok-4.6',label:'Grok 4.6',efforts:['low','medium','high','xhigh'],defaultEffort:'low'},
     {value:'grok-4.7',label:'Grok 4.7',efforts:['low','medium','high','xhigh'],defaultEffort:'low'}
   ].map(profile=>Object.freeze({...profile,efforts:Object.freeze(profile.efforts)})));
+  // Claude (Anthropic Messages API). Prices are USD per million tokens from the
+  // official price list; they only drive the local budget estimate. The
+  // Anthropic Console remains the authoritative usage and billing record.
+  const CLAUDE_MODELS = Object.freeze([
+    {value:'claude-haiku-5-5',label:'Claude Haiku 5.5',input:0.10,output:0.50,cacheRead:0.01,longInput:0.50,longOutput:2.50,longCacheRead:0.05,longThreshold:100000,webSearchTool:'web_search_20250305',webFetchTool:'web_fetch_20250910',fallbacks:false},
+    {value:'claude-sonnet-5-5',label:'Claude Sonnet 5.5',input:2,output:10,cacheRead:0.10,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true},
+    {value:'claude-opus-5-5',label:'Claude Opus 5.5',input:4,output:20,cacheRead:0.20,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true}
+  ].map(Object.freeze));
+  // Auto is not a model: a cheap Haiku pre-screen routes each post check to
+  // Haiku, or to Sonnet when the post looks hard. Haiku also screens.
+  const CLAUDE_AUTO = 'auto';
+  const CLAUDE_BASE_MODEL = 'claude-haiku-5-5', CLAUDE_HARD_MODEL = 'claude-sonnet-5-5', CLAUDE_TRIAGE_MODEL = CLAUDE_BASE_MODEL;
+  const CLAUDE_EFFORTS = Object.freeze(['low','medium','high']);
+  const CLAUDE_WEB_SEARCH_USD = 0.01;
+  function claudeModelProfile(model) { return CLAUDE_MODELS.find(profile=>profile.value===model)||null; }
+  function claudeEffort(value) { return CLAUDE_EFFORTS.includes(value)?value:'medium'; }
+  // Local billing cycle: it starts on the configured day (1-28) at 00:00 local
+  // time, matching a monthly subscription credit that does not roll over.
+  function claudeCycle(now=Date.now(), day=15) {
+    const resetDay=Math.min(28,Math.max(1,Math.trunc(Number(day))||15));
+    const date=new Date(now);
+    let start=new Date(date.getFullYear(),date.getMonth(),resetDay);
+    if(start.getTime()>date.getTime())start=new Date(date.getFullYear(),date.getMonth()-1,resetDay);
+    const end=new Date(start.getFullYear(),start.getMonth()+1,resetDay);
+    return {start:start.getTime(),end:end.getTime(),day:resetDay};
+  }
   function modelProfile(model) {
     const value=model==='grok-4.3-latest'?'grok-4.3':model;
     return API_MODELS.find(profile=>profile.value===value)||null;
@@ -58,12 +87,16 @@
     return ['auto','none','minimal','low','medium','high','xhigh'].includes(value)?value:'none';
   }
   function providerModel(settings) {
+    // `claudeRoute` is a job-only field the worker sets after the pre-screen.
+    if(settings?.provider==='claude')return settings.claudeModel===CLAUDE_AUTO?(claudeModelProfile(settings.claudeRoute)?settings.claudeRoute:CLAUDE_BASE_MODEL):
+      claudeModelProfile(settings.claudeModel)?settings.claudeModel:CLAUDE_BASE_MODEL;
     return settings?.provider==='oauth'?settings.oauthModel||'grok-4.3':settings?.provider==='build'?settings.buildModel||'grok-4.3':settings?.apiModel||'grok-4.3';
   }
   function providerEffort(settings) {
+    if(settings?.provider==='claude')return claudeEffort(settings.claudeEffort);
     return settings?.provider==='oauth'?oauthReasoningEffort(settings.oauthReasoningEffort):settings?.provider==='build'?buildReasoningEffort(providerModel(settings),settings.buildReasoningEffort):reasoningEffort(providerModel(settings),settings?.apiReasoningEffort);
   }
-  const API_FAILURE_PROVIDER_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_image','invalid_image_url','image_parse_error','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','rate_limit_exceeded','rate_limit_error','too_many_requests','resource_exhausted','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','server_error','internal_server_error','internal_error','service_unavailable','service_unavailable_error','overloaded_error','timeout','request_timeout','gateway_timeout','tool_error','tool_unavailable','search_error','search_unavailable','content_filter']);
+  const API_FAILURE_PROVIDER_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_image','invalid_image_url','image_parse_error','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','rate_limit_exceeded','rate_limit_error','too_many_requests','resource_exhausted','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','server_error','internal_server_error','internal_error','service_unavailable','service_unavailable_error','overloaded_error','timeout','request_timeout','gateway_timeout','tool_error','tool_unavailable','search_error','search_unavailable','content_filter','billing_error','not_found_error','api_error']);
   function apiFailureProviderCode(value){
     if(typeof value!=='string'||value.length>64)return undefined;
     const code=value.toLowerCase().replace(/-/g,'_');
@@ -78,11 +111,54 @@
     if(value?.httpStatus===429||code==='resource_exhausted')return 'limited';
     return '';
   }
+  // The i18n key for a failed check. A connection's own API ladder answers
+  // first, then the owner of a prefixed code; the shared ladders follow.
+  // The OAuth catalog case needs live sign-in state and stays with the caller.
+  function providerErrorKey(code,failure,provider) {
+    const selected=Providers.resolve(provider),owner=Providers.codeOwner(code);
+    const http=failure?.httpStatus,providerCode=apiFailureProviderCode(failure?.providerCode);
+    const own=code==='API_ERROR'&&selected.errors.apiError?.(http,providerCode,failure);
+    if(own)return own;
+    const owned=owner&&(owner.errors.codes[code]||owner.errors.fallback);
+    if(owned)return owned;
+    if(code==='MODEL_UNSUPPORTED')return 'error.modelUnsupported';
+    if(code==='MEDIA_INPUT_LIMIT')return 'error.mediaLimit';
+    if(code==='API_IMAGE_INPUT')return 'error.apiImageInput';
+    if(code==='API_CAPACITY'||failure?.errorCode==='API_CAPACITY')return 'error.apiCapacity';
+    const limit=accountLimitReason(failure)||(code==='RATE_LIMIT'||failure?.code==='RATE_LIMIT'?'limited':'');
+    if(limit)return 'account.'+limit;
+    if(code==='API_ERROR'){
+      const override=selected.errors.apiOverrides||{};
+      if(http===401||['invalid_api_key','authentication_error','unauthenticated'].includes(providerCode))return override.keyRejected||'error.apiKeyRejected';
+      if(http===402||['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded'].includes(providerCode))return override.usage||'error.apiUsage';
+      if(http===403||['permission_error','permission_denied','forbidden'].includes(providerCode))return override.access||'error.apiAccess';
+      if(http===429||failure?.code==='RATE_LIMIT')return 'status.rateLimited';
+      if(failure?.code==='CONNECTION')return 'error.apiConnection';
+      if(http>=500||failure?.code==='SERVER')return 'error.apiServer';
+      if(http>=400&&http<500||failure?.code==='ACCESS')return 'error.apiRequest';
+      return 'error.apiFailed';
+    }
+    if(['API_STREAM_INTERRUPTED','API_STREAM_ERROR'].includes(code))return 'error.apiConnection';
+    if(code==='TIMEOUT')return 'error.apiTimeout';
+    if(code==='API_INCOMPLETE')return failure?.code==='OUTPUT_LIMIT'?'error.apiOutputLimit':'error.apiIncomplete';
+    return ({RATE_LIMIT:'status.rateLimited',NEEDS_KEY:'status.needsKey',KEY_MIGRATION_REQUIRED:'status.needsKey',
+      CANCELLED:'status.cancelled',RAIL_COLLAPSED:'status.disabled',URL_SEARCH_REQUIRED:'error.urlSearchRequired',API_LANGUAGE_MISMATCH:'error.outputLanguageMismatch'})[code]||'status.failed';
+  }
+  // Errors that a usage or billing page can resolve.
+  const USAGE_ISSUE_KEYS=new Set(['status.rateLimited',...Providers.list.flatMap(descriptor=>descriptor.usageIssueKeys)]);
+  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||USAGE_ISSUE_KEYS.has(key));}
+  // Extension pages show only an official xAI device page with the user code;
+  // any other URL, credential or parameter is dropped.
+  function officialOAuthURL(value){
+    if(typeof value!=='string'||value.length>2048)return '';
+    try{const url=new URL(value);if(!['https://accounts.x.ai','https://auth.x.ai'].includes(url.origin)||url.username||url.password||url.hash||!/^\/oauth2\/device(?:\/|$)/.test(url.pathname))return '';for(const key of url.searchParams.keys())if(!['user_code','client_id'].includes(key))return '';return url.href;}catch{return '';}
+  }
+  function oauthErrorKey(code){return ({OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_AUTHORIZATION_DENIED:'oauth.denied',OAUTH_AUTHORIZATION_EXPIRED:'oauth.expired',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_EXPIRED_TOKEN:'oauth.expired',OAUTH_NETWORK_ERROR:'oauth.networkError',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError',OAUTH_NETWORK:'oauth.networkError',OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_NOT_CONNECTED:'oauth.needsLogin',OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_CANCELLED:'oauth.canceled',OAUTH_CATALOG_ERROR:'oauth.catalogUnavailable',OAUTH_CATALOG_FAILED:'oauth.catalogUnavailable',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable'})[code]||'oauth.unavailable';}
   const AUTO_RETRY_DELAY_MS=3000;
   const AUTO_RETRY_LIMIT=5;
   const RETRY_CANCEL_CODES=new Set(['CANCELED','CANCELLED','BUILD_CANCELED','BUILD_CANCELLED','BUILD_CANCEL_UNCONFIRMED','RAIL_COLLAPSED']);
-  const RETRY_SETUP_CODES=new Set(['NEEDS_KEY','KEY_MIGRATION_REQUIRED','POST_INVALID','URL_SEARCH_REQUIRED','BUILD_CONNECTION_REQUIRED','BUILD_AUTH_FAILED','BUILD_PERMISSION_REQUIRED','BUILD_LOGIN_REQUIRED','BUILD_NATIVE_MISSING','BUILD_UNAVAILABLE','BUILD_VERSION_UNSUPPORTED','BUILD_CONFIG_UNSUPPORTED','BUILD_MODEL_UNSUPPORTED','BUILD_EFFORT_UNSUPPORTED','BUILD_TOOL_POLICY','BUILD_PROTOCOL_ERROR','BUILD_ACCESS_DENIED']);
-  const RETRY_BUDGET_CODES=new Set(['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded']);
+  const RETRY_SETUP_CODES=new Set(['NEEDS_KEY','CLAUDE_BUDGET','KEY_MIGRATION_REQUIRED','POST_INVALID','URL_SEARCH_REQUIRED','BUILD_CONNECTION_REQUIRED','BUILD_AUTH_FAILED','BUILD_PERMISSION_REQUIRED','BUILD_LOGIN_REQUIRED','BUILD_NATIVE_MISSING','BUILD_UNAVAILABLE','BUILD_VERSION_UNSUPPORTED','BUILD_CONFIG_UNSUPPORTED','BUILD_MODEL_UNSUPPORTED','BUILD_EFFORT_UNSUPPORTED','BUILD_TOOL_POLICY','BUILD_PROTOCOL_ERROR','BUILD_ACCESS_DENIED']);
+  const RETRY_BUDGET_CODES=new Set(['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded','billing_error']);
   const RETRY_ACCESS_CODES=new Set(['invalid_request_error','invalid_request','bad_request','invalid_api_key','authentication_error','unauthenticated','permission_error','permission_denied','forbidden','model_not_found','model_not_supported','unsupported_model','unsupported_parameter','invalid_parameter','invalid_argument','context_length_exceeded','content_filter']);
   const RETRY_SERVICE_CODES=new Set(['API_ERROR','API_INCOMPLETE','API_STREAM_INTERRUPTED','API_STREAM_ERROR','API_LANGUAGE_MISMATCH','API_CAPACITY','RATE_LIMIT','TIMEOUT','COMMENTS_INVALID_RESPONSE','BUILD_BUSY','BUILD_TIMEOUT','BUILD_DISCONNECTED','BUILD_RATE_LIMIT','BUILD_QUOTA','BUILD_OUTPUT_INVALID','BUILD_LANGUAGE_MISMATCH','BUILD_SEARCH_NOT_PERFORMED','UNKNOWN']);
   function autoRetryDecision(value) {
@@ -106,7 +182,7 @@
     if(failures.some(item=>item.code==='ACCESS'))return {retryable:false,reason:'request_rejected'};
     // OAuth refresh is owned by the credential manager. A model request whose
     // result is unknown must never be replayed by the generic retry scheduler.
-    if(values.some(item=>item.provider==='oauth')||codes.some(code=>typeof code==='string'&&code.startsWith('OAUTH_')))return {retryable:false,reason:'oauth_no_replay'};
+    if(values.some(item=>Providers.get(item.provider)?.autoRetry===false)||codes.some(code=>Providers.codeOwner(code)?.autoRetry===false))return {retryable:false,reason:'oauth_no_replay'};
     if(codes.includes('API_CAPACITY'))return {retryable:true,reason:'capacity'};
     if(codes.some(code=>['RATE_LIMIT','BUILD_RATE_LIMIT','BUILD_QUOTA','BUILD_BUSY'].includes(code))||statuses.includes(429)||failures.some(item=>item.code==='RATE_LIMIT'))return {retryable:true,reason:'rate_limit'};
     if(statuses.some(status=>status>=500))return {retryable:true,reason:'server'};
@@ -250,6 +326,73 @@
     }
     return found?hidden(inFence&&!final?'pending':'tool_only'):content();
   }
+  // Every fact check opens with one strict ASCII marker line for the target's
+  // central claim. Providers strip it before any surface displays the answer.
+  const VERDICTS=Object.freeze(['accurate','inaccurate','mixed','unproven','none']);
+  // Canonical display order of the parts a check could not cover.
+  const CHECK_GAPS=Object.freeze(['text','media','video','links','search']);
+  const VERDICT_ALIASES=Object.freeze({ACCURATE:'accurate',TRUE:'accurate',INACCURATE:'inaccurate',FALSE:'inaccurate',
+    MIXED:'mixed',MISLEADING:'mixed',PARTLY_TRUE:'mixed',UNPROVEN:'unproven',UNVERIFIABLE:'unproven',INSUFFICIENT:'unproven',
+    INSUFFICIENT_EVIDENCE:'unproven',NONE:'none',NO_CLAIM:'none',NOCLAIM:'none'});
+  const LIMIT_ALIASES=Object.freeze({TEXT:'text',MEDIA:'media',IMAGE:'media',IMAGES:'media',VIDEO:'video'});
+  const VERDICT_LINE=/^\s*[*_`#>\[\]\s]*VERDICT\s*[:：][^\n]*(?:\n|$)/i;
+  const MAX_PENDING_VERDICT=160;
+  function verdictOutput(value,{final=false}={}) {
+    const text=typeof value==='string'?value:'';
+    const start=text.length-text.trimStart().length,end=text.indexOf('\n',start);
+    const raw=end<0?text.slice(start):text.slice(start,end);
+    // Models decorate the line with Markdown or a fullwidth colon; normalize
+    // only for matching. Nothing after the first line is ever examined.
+    const head=raw.replace(/^[*_`#>[\]\s]+|[*_`#>[\]\s]+$/g,'').replace(/：/g,':');
+    if(end<0&&!final&&('VERDICT'.startsWith(head.toUpperCase())||/^VERDICT/i.test(head)&&raw.length<=MAX_PENDING_VERDICT))
+      return {text:'',verdict:null,limits:[],pending:true};
+    const match=head.match(/^VERDICT\s*:\s*([A-Z_]+)\s*(?:[;|,]\s*LIMITS?\s*:\s*([A-Z_ ,]*))?$/i);
+    if(!match)return {text,verdict:null,limits:[],pending:false};
+    const tokens=(match[2]||'').toUpperCase().split(/[\s,]+/).map(token=>LIMIT_ALIASES[token]);
+    return {text:end<0?'':text.slice(end+1).replace(/^(?:[ \t]*\n)+/,''),verdict:VERDICT_ALIASES[match[1].toUpperCase()]||null,
+      limits:CHECK_GAPS.filter(gap=>tokens.includes(gap)),pending:false};
+  }
+  function formatVerdictLine(verdict,limits=[]) {
+    if(!VERDICTS.includes(verdict))return '';
+    // Search and links are never model limits: the extension observes them.
+    const listed=CHECK_GAPS.filter(gap=>!['links','search'].includes(gap)&&limits.includes(gap));
+    return 'VERDICT: '+verdict.toUpperCase()+(listed.length?'; LIMITS: '+listed.join(',').toUpperCase():'');
+  }
+  function providerCanSearchX(settings) {return Providers.resolve(settings?.provider).caps.xSearch&&settings?.xSearch===true;}
+  // Gaps come mostly from facts the extension already knows. The model's own
+  // LIMITS can add to them but never remove one. A draft is read in full, so
+  // its only gaps are unsent attachments and a missing search. `webFetch` is
+  // reported only by connections that can open the post's links (Claude).
+  function checkGaps({post,settings,searched,webFetch,limits=[],verdict}) {
+    const draft=post?.kind==='draft',gaps=new Set(draft?[]:limits),canFetchX=providerCanSearchX(settings);
+    const images=Array.isArray(post?.images)?post.images:[];
+    if(!draft&&post?.textTruncated===true&&!canFetchX)gaps.add('text');
+    if(draft?post.hasUncheckedMedia===true:images.some(image=>image?.kind!=='video-thumbnail'&&!imageInputURL(image?.url))||
+        post?.hasMedia===true&&post.hasVideo!==true&&!images.length)gaps.add('media');
+    if(!draft&&post?.hasVideo===true&&!canFetchX)gaps.add('video');
+    // A post with no checkable claim had nothing to search for or open.
+    if(webFetch&&!(webFetch.succeeded>0)&&fetchableLinks(post).length&&verdict!=='none')gaps.add('links');
+    if(searched!==true&&verdict!=='none')gaps.add('search');
+    return CHECK_GAPS.filter(gap=>gaps.has(gap));
+  }
+  function verdictFields(output,context) {
+    const gaps=checkGaps({...context,limits:output.limits,verdict:output.verdict});
+    return {...(output.verdict?{verdict:output.verdict}:{}),...(gaps.length?{gaps}:{})};
+  }
+  // Every surface reads stored or received results through this view.
+  function verdictView(result) {
+    const verdict=VERDICTS.includes(result?.verdict)?result.verdict:null;
+    const gaps=Array.isArray(result?.gaps)?CHECK_GAPS.filter(gap=>result.gaps.includes(gap)):[];
+    return {verdict,gaps,tentative:gaps.includes('search')&&['accurate','inaccurate','mixed'].includes(verdict)};
+  }
+  // Labels for a surface's verdict row. Each surface builds its own DOM from
+  // this with textContent only and hides the row when it carries nothing.
+  function verdictRow(result,t) {
+    const {verdict,gaps,tentative}=verdictView(result),label=verdict?t('verdict.'+verdict):'';
+    const items=gaps.map(gap=>({gap,label:t('gaps.'+gap),title:t('gaps.'+gap+'Title')}));
+    const aria=[label&&t('verdict.aria',{verdict:label}),items.length&&t('gaps.aria',{gaps:items.map(item=>item.label).join(', ')})].filter(Boolean).join('. ');
+    return {verdict,tentative,label,prefix:t('gaps.label'),gaps:items,aria,empty:!label&&!items.length};
+  }
   function explanationMode(settings) {
     return ['preset', 'custom'].includes(settings?.explanationMode) ? settings.explanationMode : 'preset';
   }
@@ -262,7 +405,27 @@
     return Object.fromEntries(Object.entries(DEFAULT_CUSTOM_TRIGGERS).map(([key,fallback])=>[key,
       typeof fallback==='boolean'?(typeof value[key]==='boolean'?value[key]:fallback):boundedNumber(value[key],fallback,0,30000)]));
   }
+  // Claude bills every request to the user's own API credit. Unless the user
+  // explicitly opts in, the effective trigger set is the post button only.
+  // Saved trigger preferences stay untouched for the other connections.
+  // "Only when I click": the post button and nothing else. Hover waits are
+  // numbers and stay as the user set them.
+  const CLICK_ONLY_TRIGGERS=Object.freeze({manual:true,buttonHover:false,postHover:false,detailMain:false,detailReplies:false});
+  const CLAUDE_MANUAL_TRIGGERS=Object.freeze({...DEFAULT_CUSTOM_TRIGGERS,...CLICK_ONLY_TRIGGERS});
+  function clickOnlyTriggers(settings){
+    if(triggerMode(settings)!=='custom')return false;
+    const triggers=normalizeCustomTriggers(settings.customTriggers);
+    return Object.entries(CLICK_ONLY_TRIGGERS).every(([key,value])=>triggers[key]===value);
+  }
+  // Named for the only connection that has an opt-in today (see the registry).
+  const claudeManualOnly=Providers.manualOnly;
+  function effectiveTriggerSettings(settings){
+    if(!claudeManualOnly(settings))return settings;
+    const mode=triggerMode(settings);
+    return {...settings,triggerMode:mode==='paused'?'paused':'custom',enabled:mode!=='paused',customTriggers:CLAUDE_MANUAL_TRIGGERS};
+  }
   function postTriggerAllowed(settings,kind,post,pageUrl) {
+    settings=effectiveTriggerSettings(settings);
     const mode=triggerMode(settings);
     if(mode==='paused')return false;
     if(kind==='recheck')return true;
@@ -276,6 +439,70 @@
     if(!current||!target)return false;
     const currentId=current.match(/\/status\/(\d+)$/)?.[1],targetId=target.match(/\/status\/(\d+)$/)?.[1];
     return kind==='detail-main'?triggers.detailMain&&currentId===targetId:triggers.detailReplies&&currentId!==targetId;
+  }
+  // Pre-screening only ever stops a check nobody explicitly asked for: these
+  // trigger kinds start on their own (dwell, hover or a detail page).
+  const AUTOMATIC_TRIGGERS = Object.freeze(['automatic','post-hover','button-hover','detail-main','detail-reply']);
+  function automaticTrigger(kind) { return AUTOMATIC_TRIGGERS.includes(kind); }
+  // The free local pre-screen, for every connection: a post this short with
+  // nothing attached carries no claim worth a paid or quota-limited check.
+  // Han, kana and Hangul characters each carry about a word, so count three.
+  const PRESCREEN_MIN_WEIGHT = 8;
+  function triagePrefilter(post) {
+    if (!post || post.images?.length || post.hasMedia === true || post.hasVideo === true || post.quotedContext?.length ||
+        post.textTruncated === true || post.links?.length || post.communityNote) return null;
+    const prose = String(post.text || '').replace(/https?:\/\/\S+|[@#][\p{L}\p{N}_]+/gu, '');
+    let weight = 0;
+    for (const [char] of prose.matchAll(/[\p{L}\p{N}]/gu)) weight += /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char) ? 3 : 1;
+    return weight < PRESCREEN_MIN_WEIGHT ? {checkable:'no', kind:'short', local:true} : null;
+  }
+  // The paid Claude pre-screen. 'skip' may stop an automatic check that has no
+  // checkable claim; 'route' only picks Auto's model. Drafts and comments are
+  // never screened. Only a connection with caps.triage offers the screener;
+  // the settings it reads are Claude's because Claude is the only one.
+  function triageApplies(settings, kind) {
+    if (Providers.get(settings?.provider)?.caps.triage !== true || settings.task) return null;
+    if (settings.claudeAutoTrigger === true && settings.claudeTriage !== false && automaticTrigger(kind)) return 'skip';
+    return settings.claudeModel === CLAUDE_AUTO ? 'route' : null;
+  }
+  // The screener answers in codes only, so no model prose reaches the page.
+  const TRIAGE_CHECKABLE = Object.freeze(['yes','no','unclear']);
+  const TRIAGE_KINDS = Object.freeze(['factual','opinion','personal','joke','promo','question','other']);
+  const TRIAGE_DIFFICULTY = Object.freeze(['simple','hard']);
+  const TRIAGE_SIGNALS = Object.freeze(['contested','high_stakes','recent_news','statistics','media_claim','multiple_claims']);
+  // What a skipped post's row may name; anything else reads as "Other".
+  const TRIAGE_SKIP_KINDS = Object.freeze(['opinion','personal','joke','promo','question','short','other']);
+  const TRIAGE_ROUTES = Object.freeze(['hard','simple','fallback','short']);
+  function sanitizeTriage(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length !== 4 ||
+        !TRIAGE_CHECKABLE.includes(raw.checkable) || !TRIAGE_KINDS.includes(raw.kind) || !TRIAGE_DIFFICULTY.includes(raw.difficulty) ||
+        !Array.isArray(raw.signals) || raw.signals.some(signal => !TRIAGE_SIGNALS.includes(signal))) return null;
+    return {checkable:raw.checkable, kind:raw.kind, difficulty:raw.difficulty, signals:TRIAGE_SIGNALS.filter(signal => raw.signals.includes(signal))};
+  }
+  function triageSkipKind(triage) { return TRIAGE_SKIP_KINDS.includes(triage?.kind) ? triage.kind : 'other'; }
+  // Auto sends a post to Sonnet only when the screen calls it hard. A failed
+  // screen never costs more than the cheapest check.
+  function triageRoute(triage) {
+    if (triage?.local) return {model:CLAUDE_BASE_MODEL, reason:'short'};
+    if (!triage || triage.failed) return {model:CLAUDE_BASE_MODEL, reason:'fallback'};
+    const hard = triage.checkable !== 'no' && (triage.checkable === 'unclear' || triage.difficulty === 'hard' ||
+      triage.signals.some(signal => signal === 'contested' || signal === 'high_stakes'));
+    return hard ? {model:CLAUDE_HARD_MODEL, reason:'hard'} : {model:CLAUDE_BASE_MODEL, reason:'simple'};
+  }
+  // How long finished answers are reused, measured from when each was made,
+  // never from its last use: a fact check goes stale with the news. Session
+  // answers stay in memory-backed storage; day periods persist on this device,
+  // within a bound that leaves room for history in the 10 MB local quota.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const CACHE_RETENTIONS = Object.freeze({
+    session: Object.freeze({ttlMs: DAY_MS, area: 'session', maxEntries: 160, maxBytes: 4_000_000}),
+    '1d': Object.freeze({ttlMs: DAY_MS, area: 'local', maxEntries: 120, maxBytes: 2_000_000}),
+    '7d': Object.freeze({ttlMs: 7 * DAY_MS, area: 'local', maxEntries: 120, maxBytes: 2_000_000})
+  });
+  // Turning browsing history off also keeps answers off disk.
+  function cacheRetention(settings, historyEnabled = true) {
+    const choice = historyEnabled === false ? 'session' : settings?.answerCacheRetention;
+    return Object.hasOwn(CACHE_RETENTIONS, choice) ? CACHE_RETENTIONS[choice] : CACHE_RETENTIONS['1d'];
   }
   const DEFAULT_SETTINGS = Object.freeze({
     provider: 'oauth',
@@ -298,10 +525,18 @@
     buildPort: 2419,
     buildModel: 'grok-4.3',
     buildReasoningEffort: 'none',
+    claudeModel: 'claude-haiku-5-5',
+    claudeEffort: 'medium',
+    claudeMaxSearches: 3,
+    claudeBudgetUsd: 100,
+    claudeCycleDay: 15,
+    claudeAutoTrigger: false,
+    claudeTriage: true,
     apiConcurrency: 3,
     apiVerification: 'only',
     webSearch: true,
     xSearch: true,
+    answerCacheRetention: '1d',
     explanationMode: 'preset',
     verifyPrompt: DEFAULT_PROMPTS.verify,
     postDraftPrompt: DEFAULT_PROMPTS.postDraft,
@@ -390,7 +625,7 @@
     const mode=triggerMode(value);
     return {
       // The retired page automation provider is unrelated to Grok Build.
-      provider: ['api','build','oauth'].includes(value.provider) ? value.provider : defaultProvider,
+      provider: Providers.has(value.provider) ? value.provider : defaultProvider,
       enabled: mode!=='paused',
       triggerMode: mode,
       customTriggers: normalizeCustomTriggers(value.customTriggers),
@@ -413,11 +648,19 @@
       buildPort: boundedNumber(value.buildPort, DEFAULT_SETTINGS.buildPort, 1024, 65535),
       buildModel: normalizedBuildModel,
       buildReasoningEffort: buildReasoningEffort(normalizedBuildModel,migrateBuildDefaults?DEFAULT_SETTINGS.buildReasoningEffort:value.buildReasoningEffort),
+      claudeModel: value.claudeModel === CLAUDE_AUTO || claudeModelProfile(value.claudeModel) ? value.claudeModel : DEFAULT_SETTINGS.claudeModel,
+      claudeEffort: claudeEffort(value.claudeEffort),
+      claudeMaxSearches: boundedNumber(value.claudeMaxSearches, DEFAULT_SETTINGS.claudeMaxSearches, 1, 10),
+      claudeBudgetUsd: boundedNumber(value.claudeBudgetUsd, DEFAULT_SETTINGS.claudeBudgetUsd, 0, 100000),
+      claudeCycleDay: boundedNumber(value.claudeCycleDay, DEFAULT_SETTINGS.claudeCycleDay, 1, 28),
+      claudeAutoTrigger: value.claudeAutoTrigger === true,
+      claudeTriage: value.claudeTriage !== false,
       apiConcurrency: !currentDefaults&&concurrency===4?DEFAULT_SETTINGS.apiConcurrency:concurrency,
       // Legacy explanation/combined/off choices all become one fact-check task.
       apiVerification: 'only',
       webSearch: typeof value.webSearch === 'boolean' ? value.webSearch : DEFAULT_SETTINGS.webSearch,
       xSearch: typeof value.xSearch === 'boolean' ? value.xSearch : DEFAULT_SETTINGS.xSearch,
+      answerCacheRetention: Object.hasOwn(CACHE_RETENTIONS, value.answerCacheRetention) ? value.answerCacheRetention : DEFAULT_SETTINGS.answerCacheRetention,
       explanationMode: explanationMode(value),
       // A temporarily retired editor must not erase a user's existing draft.
       // This dormant field has no default and is never used by live requests.
@@ -654,7 +897,10 @@
     if (!article || typeof article.querySelectorAll !== 'function') return null;
     const post = scopePost(article, article);
     if (!post.id || !post.url) return null;
-    if (DOM?.isModern(article)) return {...post, quotedContext:DOM.quoteRoots(article).map(scope => extractPostContext(scope, 1)).filter(Boolean), isPromoted:isPromoted(article)};
+    // Only the checked post's own truncation matters; postFingerprint ignores
+    // the flag because expanding the post changes its text anyway.
+    if (DOM?.mainTextTruncated(article)) post.textTruncated = true;
+    if (DOM?.isModern(article)) return {...post, quotedContext:DOM.quoteRoots(article).map(scope => extractPostContext(scope, 1)).filter(Boolean), isPromoted:isPromoted(article), ...postReferences(article)};
     const roots = new Set(), visibility = new WeakMap();
     for (const element of all(article, 'a[href], [data-testid="tweetText"], time')) {
       if (!displayed(element, article, visibility) || !outsideComposer(element, article)) continue;
@@ -664,7 +910,75 @@
     // Keep the main post's established identity/language extraction, but use
     // owned scopes for quoted cards so nested media/text stays with its source.
     const quotedContext = Array.from(roots).map(scope => extractPostContext(scope, 1)).filter(Boolean);
-    return { ...post, quotedContext, isPromoted: isPromoted(article) };
+    return { ...post, quotedContext, isPromoted: isPromoted(article), ...postReferences(article) };
+  }
+
+  // Outbound links a post itself carries. Claude cannot read X, so these and
+  // a displayed Community Note are the evidence trail it gets from the page.
+  const MAX_POST_LINKS = 4, MAX_NOTE_LINKS = 2;
+  const X_HOST = /^(?:www\.|mobile\.)?(?:x|twitter)\.com$/i;
+  const NOTE_SELECTOR = '[data-testid="birdwatch-pivot"], [data-testid="birdwatch-note"]';
+  function linkURL(value) {
+    if (typeof value !== 'string' || value.length > 2048) return null;
+    try {
+      const url = new URL(value);
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.port || !url.hostname.includes('.')) return null;
+      url.hash = '';
+      return url.href.length <= 2048 ? url.href : null;
+    } catch (_) { return null; }
+  }
+  function anchorLink(anchor) {
+    let href;
+    try { href = new URL(attribute(anchor, 'href'), 'https://x.com'); } catch (_) { return null; }
+    // Mentions, hashtags and cashtags lead to X profile or search pages.
+    if (X_HOST.test(href.hostname) && !canonicalPostUrl(href.href)) return null;
+    // X shortens the label but keeps the whole address in the anchor's hidden
+    // text. Use it only for X's own shortener; otherwise trust the href.
+    const shown = href.hostname === 't.co' ? String(anchor.textContent || '').replace(/\s+/g, '').replace(/…$/, '') : '';
+    const url = linkURL(shown) || linkURL(href.href);
+    return url ? {href:href.href, url} : null;
+  }
+  function postReferences(article) {
+    const modern = DOM?.isModern(article), visibility = new WeakMap();
+    const own = modern ? node => DOM.owns(node, article) :
+      node => ownedBy(node, article, article) && displayed(node, article, visibility) && outsideComposer(node, article);
+    const bodies = modern ? DOM.bodyNodes(article) : all(article, '[data-testid="tweetText"]').filter(own);
+    // Link cards are quote boundaries, so their contents never join the post's
+    // own text. The modern layout has no card marker yet: best effort only.
+    const cards = modern ? DOM.quoteRoots(article).filter(root => attribute(root, 'data-testid') === 'card.wrapper') :
+      all(article, '[data-testid="card.wrapper"]').filter(own);
+    const found = [];
+    // A body link and its preview card share one t.co address.
+    const add = (link, title = '') => {
+      if (!link) return;
+      let entry = found.find(item => item.href === link.href || item.url === link.url);
+      if (!entry) found.push(entry = {href:link.href, url:link.url});
+      if (title && !entry.title) entry.title = title;
+    };
+    for (const body of bodies) for (const anchor of all(body, 'a[href]').filter(own)) add(anchorLink(anchor));
+    for (const card of cards) {
+      const anchor = all(card, 'a[href]')[0];
+      if (anchor) add(anchorLink(anchor), textOf(card).split('\n').filter(Boolean).slice(0, 3).join(' · ').slice(0, 300));
+    }
+    const links = found.slice(0, MAX_POST_LINKS).map(({href, ...link}) => link);
+    const note = all(article, NOTE_SELECTOR).find(own), noteText = textOf(note).slice(0, 1500);
+    const noteLinks = [...new Set(all(note, 'a[href]').map(anchorLink).filter(Boolean).map(link => link.url))].slice(0, MAX_NOTE_LINKS);
+    return {...(links.length ? {links} : {}),
+      ...(noteText ? {communityNote:{text:noteText, links:noteLinks.map(url => ({url}))}} : {})};
+  }
+  // The pages Claude may open: the post's own links, never X itself. An
+  // unexpanded t.co address stays listed as context, but opening it would
+  // only pass through X's tracking redirect, so Claude's web_fetch blocks it.
+  function fetchableLinks(post) {
+    const urls = [...(Array.isArray(post?.links) ? post.links : []), ...(Array.isArray(post?.communityNote?.links) ? post.communityNote.links : [])]
+      .map(link => linkURL(link?.url)).filter(Boolean);
+    return [...new Set(urls)].filter(url => { const host = new URL(url).hostname; return !X_HOST.test(host) && host !== 't.co'; });
+  }
+  // What Claude reads beyond the canonical URL. A newly shown note or link
+  // must not be answered from a check that never saw it.
+  function claudeContextKey(post) {
+    return JSON.stringify([(Array.isArray(post?.links) ? post.links : []).map(link => link?.url || ''),
+      post?.communityNote?.text || '', post?.textTruncated === true]);
   }
 
   // Composer previews can be native buttons and can omit a permalink entirely.
@@ -710,22 +1024,10 @@
     return profiles.size && (profiles.size !== 1 || !profiles.has(handles[0])) ? '' : handles[0];
   }
   function contextTextTruncated(scope) {
-    if (DOM?.isModern(scope)) return DOM.bodyNodes(scope).some(element => {
-      if (DOM.bodyExpanders(element).length) return true;
-      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
-      const inline = attribute(element, 'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
-      const clamp = Number(style?.webkitLineClamp || style?.getPropertyValue?.('-webkit-line-clamp') || style?.lineClamp || inline);
-      return clamp > 0 && Number(element.clientHeight) > 0 && Number(element.scrollHeight) > Number(element.clientHeight) + 1;
-    });
+    if (DOM?.isModern(scope)) return DOM.bodyNodes(scope).some(element => DOM.bodyExpanders(element).length > 0 || DOM.lineClamped(element));
     const visibility = new WeakMap(),owns = element => ownedBy(element, scope, scope, contextQuoteRootFor);
     if (all(scope, '[data-testid="tweet-text-show-more-link"]').some(element => owns(element) && displayed(element,scope,visibility))) return true;
-    return all(scope, '[data-testid="tweetText"]').some(element => {
-      if (!owns(element) || !displayed(element,scope,visibility)) return false;
-      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
-      const inline = attribute(element,'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
-      const clamp = Number(style?.webkitLineClamp || style?.getPropertyValue?.('-webkit-line-clamp') || style?.lineClamp || inline);
-      return clamp > 0 && Number.isFinite(clamp) && Number(element.clientHeight) > 0 && Number(element.scrollHeight) > Number(element.clientHeight) + 1;
-    });
+    return all(scope, '[data-testid="tweetText"]').some(element => owns(element) && displayed(element,scope,visibility) && DOM.lineClamped(element));
   }
   function extractPostContext(scope, depth = 0) {
     if (!scope || typeof scope.querySelectorAll !== 'function') return null;
@@ -790,9 +1092,71 @@
   function apiPostIdentity(post, settings) {
     // Comments still pass no settings because they use their visible snapshot
     // and analysis context. Native tasks keep their existing local attribution.
-    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',['build','oauth'].includes(settings.provider)?settings.provider:'api',canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
+    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',Providers.resolve(settings.provider).id,canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
     return post ? JSON.stringify([nativePostIdentity(post),
       (Array.isArray(post.quotedContext) ? post.quotedContext : []).map(nativePostIdentity)]) : '';
+  }
+
+  // Layout self-check. A notice needs positive evidence that X shows posts
+  // SuperX cannot read, repeated over several probes after the page settles.
+  // Empty, loading, signed-out and non-timeline pages are never evidence.
+  const LAYOUT_HEALTH = Object.freeze({probeMs:2500, settleMs:8000, confirm:3, recover:2, minEvidence:3, minButtonSample:3, maxCount:50});
+  const LAYOUT_CODES = Object.freeze(['posts', 'actions']);
+  const LAYOUT_ROUTES = Object.freeze(['home', 'status', 'profile', 'search', 'list', 'bookmarks']);
+  // Must equal package.json bugs.url; a test keeps the two in step.
+  const ISSUES_URL = 'https://github.com/bwjoke/SuperX/issues';
+
+  function layoutFailure(probe, {postButton = false} = {}) {
+    if (!probe || !LAYOUT_ROUTES.includes(probe.route) || probe.signedOut) return null;
+    if (probe.evidence >= LAYOUT_HEALTH.minEvidence && probe.readable === 0) return 'posts';
+    // A missing post button matters only to someone who uses it.
+    if (postButton && probe.readable >= LAYOUT_HEALTH.minButtonSample && probe.withControls === 0) return 'actions';
+    return null;
+  }
+
+  // State per page: `code` is the confirmed failure on show, or null. A probe
+  // that shows neither a failure nor readable posts (an empty, signed-out or
+  // non-timeline view, such as another tab of the same search) breaks a
+  // failure streak but never clears a confirmed failure; only consecutive
+  // readable probes or a new page do.
+  function layoutHealthStep(state, {page, probe, postButton}, now) {
+    const current = state?.page === page ? state : {page, since:now, candidate:null, failStreak:0, okStreak:0, code:null, probe:null};
+    const failure = layoutFailure(probe, {postButton});
+    if (failure) {
+      const failStreak = failure === current.candidate ? current.failStreak + 1 : 1;
+      const confirmed = failStreak >= LAYOUT_HEALTH.confirm && now - current.since >= LAYOUT_HEALTH.settleMs;
+      return {...current, candidate:failure, failStreak, okStreak:0, code:confirmed ? failure : current.code, probe:confirmed ? probe : current.probe};
+    }
+    const healthy = Boolean(probe) && LAYOUT_ROUTES.includes(probe.route) && !probe.signedOut && probe.readable > 0;
+    const okStreak = healthy ? current.okStreak + 1 : 0;
+    const code = okStreak >= LAYOUT_HEALTH.recover ? null : current.code;
+    return {...current, candidate:null, failStreak:0, okStreak, code, probe:code ? current.probe : null};
+  }
+
+  // The only fields a layout report may carry: no URL, handle, ID or text.
+  function layoutReport(value) {
+    if (!value || !LAYOUT_CODES.includes(value.code) || !LAYOUT_ROUTES.includes(value.route)) return null;
+    const count = number => Number.isSafeInteger(number) ? Math.min(Math.max(number, 0), LAYOUT_HEALTH.maxCount) : 0;
+    return {code:value.code, route:value.route, evidence:count(value.evidence), readable:count(value.readable),
+      withControls:count(value.withControls), language:/^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(value.language) ? value.language : ''};
+  }
+
+  function layoutIssueURL(value, {version, userAgent, now}) {
+    const report = layoutReport(value);
+    if (!report) return '';
+    const agent = String(userAgent || ''), edge = agent.match(/\bEdg\/(\d+)/), chrome = agent.match(/\bChrome\/(\d+)/);
+    const browser = edge ? 'Edge ' + edge[1] : chrome ? 'Chrome ' + chrome[1] : 'Other';
+    const body = ['No page content is included.', '',
+      'SuperX version: ' + (/^[\w.-]{1,32}$/.test(version) ? version : 'unknown'),
+      'Browser: ' + browser,
+      'Page: ' + report.route,
+      'Failure: ' + report.code,
+      'Post links found: ' + report.evidence,
+      'Posts recognised: ' + report.readable,
+      'Posts with an action bar: ' + report.withControls,
+      'X language: ' + (report.language || 'unknown'),
+      'Date: ' + new Date(now).toISOString().slice(0, 10)].join('\n');
+    return ISSUES_URL + '/new?' + new URLSearchParams({title:'X layout not readable: ' + report.code, body});
   }
 
   function visibilityEligibility(rect, viewport, options) {
@@ -863,5 +1227,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, LANGUAGES, API_MODELS, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, providers: Providers, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, officialOAuthURL, oauthErrorKey, providerErrorKey, isUsageIssue, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, CLICK_ONLY_TRIGGERS, clickOnlyTriggers, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
 });

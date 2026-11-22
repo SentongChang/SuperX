@@ -10,6 +10,7 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "check": "node tools/validate.mjs",
+    "eval": "node tools/eval.mjs",
     "package": "node tools/package-extension.mjs",
     "package:release": "node tools/package-release.mjs",
     "package:check": "node tools/package-extension.mjs --check",

@@ -147,18 +147,24 @@
     taskRequest(post,settings,'verify');
     onUpdate({text:'',sources:[],searched:false,phase:'verify',provider:'build',verified:false,apiVerification:'only',verificationStatus:'running',warning:''});
     try {
-      const result=await runStage(post,settings,'verify',undefined,{signal,onUpdate,bridge});
-      return resultFor(result,settings,result.searched?'completed':'unverified',result.searched?labels.completed:labels.unverified);
+      // Every snapshot states its verdict, so a reset text clears a stale one.
+      const result=await runStage(post,settings,'verify',undefined,{signal,bridge,onUpdate:update=>{
+        const output=Core.verdictOutput(update.text);onUpdate({...update,text:output.text,verdict:output.verdict});
+      }});
+      const output=Core.verdictOutput(result.text,{final:true});
+      if(!output.text.trim())throw Object.assign(errorFor('BUILD_OUTPUT_INVALID'),API.sanitizedMetadata(result));
+      return resultFor({...result,text:output.text,...Core.verdictFields(output,{post,settings,searched:result.searched})},settings,result.searched?'completed':'unverified',result.searched?labels.completed:labels.unverified);
     } catch(error) {
       error.verificationFailure=failureFor(error);
-      if(!error.partialText||['CANCELED','BUILD_LANGUAGE_MISMATCH'].includes(error.code))throw error;
-      try {checkLanguage(error.partialText,settings.language,false,'verify');}
+      const output=Core.verdictOutput(error.partialText||'',{final:true});
+      if(!output.text.trim()||['CANCELED','BUILD_LANGUAGE_MISMATCH'].includes(error.code))throw error;
+      try {checkLanguage(output.text,settings.language,false,'verify');}
       catch(languageError) {
         Object.assign(languageError,API.sanitizedMetadata(error));
         languageError.verificationFailure=failureFor(languageError);
         throw languageError;
       }
-      const partial=resultFor({text:error.partialText,sources:error.partialSources,searched:error.partialSearched,...API.sanitizedMetadata(error),usageComplete:error.usageComplete===true,verificationFailure:error.verificationFailure},settings,'incomplete',labels.incomplete);
+      const partial=resultFor({text:output.text,...Core.verdictFields(output,{post,settings,searched:error.partialSearched}),sources:error.partialSources,searched:error.partialSearched,...API.sanitizedMetadata(error),usageComplete:error.usageComplete===true,verificationFailure:error.verificationFailure},settings,'incomplete',labels.incomplete);
       error.partialResult=partial;
       onUpdate(partial);
       // Keep the failure visible to the caller. The worker may retain this

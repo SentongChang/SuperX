@@ -69,8 +69,8 @@ test('a premature provider closing tag fails the structural check instead of rel
 
 test('connection choices prioritize subscription sign-in with distinct short labels',()=>{
   const {ids}=strictTree(source('options')),choices=ids.get('provider').children;
-  assert.deepEqual(choices.map(node=>node.token.match(/\bvalue="([^"]+)"/)[1]),['oauth','api','build']);
-  assert.match(choices[0].token,/options\.providerOAuth/);assert.match(choices[1].token,/options\.providerKey/);assert.match(choices[2].token,/options\.providerBuild/);
+  assert.deepEqual(choices.map(node=>node.token.match(/\bvalue="([^"]+)"/)[1]),['oauth','api','build','claude']);
+  assert.match(choices[0].token,/options\.providerOAuth/);assert.match(choices[1].token,/options\.providerKey/);assert.match(choices[2].token,/options\.providerBuild/);assert.match(choices[3].token,/claude\.provider/);
 });
 
 test('OAuth connection controls retain their layout without the removed authorization and automation copy',()=>{

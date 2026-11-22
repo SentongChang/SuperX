@@ -40,11 +40,50 @@
   const isBuild = () => $("provider").value === "build";
   const isOAuth = () => $("provider").value === "oauth";
   const isAPI = () => $("provider").value === "api";
-  function oauthErrorKey(code){return ({OAUTH_ACCESS_DENIED:"oauth.denied",OAUTH_AUTHORIZATION_DENIED:"oauth.denied",OAUTH_AUTHORIZATION_EXPIRED:"oauth.expired",OAUTH_DEVICE_EXPIRED:"oauth.expired",OAUTH_EXPIRED_TOKEN:"oauth.expired",OAUTH_NETWORK_ERROR:"oauth.networkError",OAUTH_AUTH_UNAVAILABLE:"oauth.networkError",OAUTH_NETWORK:"oauth.networkError",OAUTH_STORAGE_ERROR:"oauth.storageError",OAUTH_REAUTH_REQUIRED:"oauth.reauthRequired",OAUTH_REFRESH_UNCERTAIN:"oauth.reauthRequired",OAUTH_ACCOUNT_CHANGED:"oauth.reauthRequired",OAUTH_NOT_CONNECTED:"oauth.needsLogin",OAUTH_LOGIN_REQUIRED:"oauth.needsLogin",OAUTH_CANCELLED:"oauth.canceled",OAUTH_CATALOG_ERROR:"oauth.catalogUnavailable",OAUTH_CATALOG_FAILED:"oauth.catalogUnavailable",OAUTH_CATALOG_UNAVAILABLE:"oauth.catalogUnavailable"})[code]||"oauth.unavailable";}
-  function officialOAuthURL(value){
-    if(typeof value!=="string"||value.length>2048)return "";
-    try{const url=new URL(value);if(!["https://accounts.x.ai","https://auth.x.ai"].includes(url.origin)||url.username||url.password||url.hash||!/^\/oauth2\/device(?:\/|$)/.test(url.pathname))return "";for(const key of url.searchParams.keys())if(!["user_code","client_id"].includes(key))return "";return url.href;}catch{return "";}
+  const isClaude = () => $("provider").value === "claude";
+  const claudeControlIds=["claude-api-key","clear-claude-key","claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","reset-claude-spend","claude-auto-trigger","claude-triage"];
+  let claudeStatus={configured:false,usd:0,requests:0,budgetUsd:100,cycleStart:0,cycleEnd:0},claudeKeyChanged=false;
+  function populateClaudeModels(model){
+    const select=$("claude-model");select.replaceChildren();
+    // Auto is opt-in: a pre-screen picks Haiku or Sonnet for each post.
+    const auto=document.createElement("option");auto.value=core.CLAUDE_AUTO;auto.dataset.i18n="claude.modelAuto";auto.textContent=ui.t("claude.modelAuto",uiLanguage);select.append(auto);
+    for(const item of core.CLAUDE_MODELS){const option=document.createElement("option");option.value=item.value;option.textContent=item.label;select.append(option);}
+    select.value=model===core.CLAUDE_AUTO||core.claudeModelProfile(model)?model:core.DEFAULT_SETTINGS.claudeModel;
   }
+  function formatCycleDate(value){try{return new Date(value).toLocaleDateString(uiLanguage==="auto"?undefined:uiLanguage,{month:"short",day:"numeric"});}catch{return new Date(value).toISOString().slice(5,10);}}
+  function renderClaude(){
+    $("claude-key-state").textContent=ui.t(claudeStatus.configured?"claude.keyReady":"claude.keyMissing",uiLanguage);
+    $("claude-key-state").dataset.state=claudeStatus.configured?"ready":"missing";
+    $("clear-claude-key").hidden=!claudeStatus.configured;
+    const help=$("claude-model-help");help.dataset.i18n=$("claude-model").value===core.CLAUDE_AUTO?"claude.modelAutoHelp":"claude.modelHelp";help.textContent=ui.t(help.dataset.i18n,uiLanguage);
+    $("claude-triage-field").hidden=!$("claude-auto-trigger").checked;
+    const vars={usd:(claudeStatus.usd||0).toFixed(2),budget:claudeStatus.budgetUsd,requests:claudeStatus.requests||0,start:formatCycleDate(claudeStatus.cycleStart),end:formatCycleDate(claudeStatus.cycleEnd)};
+    $("claude-spend").textContent=claudeStatus.cycleEnd?ui.t(claudeStatus.budgetUsd>0?"claude.spend":"claude.spendNoLimit",uiLanguage,vars):"";
+    $("claude-spend").dataset.state=claudeStatus.exhausted?"missing":"ready";
+  }
+  // The reuse count is fetched only once Maintenance is opened.
+  let cacheStats=null;
+  function renderCacheStats(){
+    const line=$("cache-stats");
+    $("cache-history-off").hidden=cacheStats?.historyEnabled!==false||$("cache-retention").value==="session";
+    $("cache-stats-reset").hidden=!(cacheStats?.hits>0);
+    if(!cacheStats){line.textContent="";return;}
+    if(!cacheStats.hits){line.textContent=ui.t("options.cacheStatsEmpty",uiLanguage);return;}
+    const locale=uiLanguage==="auto"?undefined:uiLanguage;
+    const parts=[ui.t("options.cacheStats",uiLanguage,{hits:cacheStats.hits,date:new Date(cacheStats.since).toLocaleDateString(locale,{dateStyle:"medium"})})];
+    if(cacheStats.usd>=0.005)parts.push(ui.t("options.cacheSavedUsd",uiLanguage,{usd:cacheStats.usd.toFixed(2)}));
+    else if(cacheStats.tokens>0)parts.push(ui.t("options.cacheSavedTokens",uiLanguage,{tokens:new Intl.NumberFormat(locale,{notation:"compact"}).format(cacheStats.tokens)}));
+    line.textContent=parts.join(" · ");
+  }
+  async function refreshCacheStats(type="GET_CACHE_STATS"){
+    try{cacheStats=await send({type});}catch(error){if(type!=="GET_CACHE_STATS")setStatus("errors.operation","error",{error:error.message});}
+    renderCacheStats();
+  }
+  async function refreshClaudeStatus(){
+    try{const result=await send({type:"GET_CLAUDE_STATUS"});claudeStatus=result;}catch{/* Other connections remain usable. */}
+    renderClaude();
+  }
+  const oauthErrorKey=core.oauthErrorKey,officialOAuthURL=core.officialOAuthURL;
   function safeOAuthStatus(raw){
     const states={disconnected:"idle",starting:"authorizing",awaiting_authorization:"authorizing",idle:"idle",authorizing:"authorizing",connected:"connected",refreshing:"refreshing",restoring:"restoring",reauth_required:"reauth_required",error:"error",logging_out:"logging_out"};
     const result={state:states[raw?.state]||"idle",connected:raw?.connected===true,remember:typeof raw?.remember==="boolean"?raw.remember:currentSettings.oauthRemember!==false,catalogModels:null};
@@ -164,7 +203,8 @@
   }
   function renderProvider() {
     const build = isBuild(),oauth=isOAuth();
-    $("api-fields").hidden = !isAPI();$("build-fields").hidden = !build;$("oauth-fields").hidden=!oauth;
+    for (const descriptor of core.providers.list) $(descriptor.panelId).hidden = descriptor.id !== $("provider").value;
+    for (const id of claudeControlIds) $(id).disabled = busy || !isClaude();
     for (const id of apiControlIds) $(id).disabled = busy || !isAPI();
     for (const id of buildControlIds) $(id).disabled = busy || !build;
     $("api-concurrency-field").hidden=build;$("api-concurrency").disabled=busy||build;
@@ -172,7 +212,7 @@
     $("source-description").hidden = !build;
     $("save").disabled = busy;
     $("verification-help").textContent=ui.t(oauth?"oauth.verificationHelp":"options.verificationHelp",uiLanguage);
-    renderBuildStatus();renderOAuth();
+    renderBuildStatus();renderOAuth();renderClaude();
   }
   function requestLocalAccess(){try{return chrome.permissions?.request({origins:["http://127.0.0.1/*"]}) || Promise.resolve(false);}catch{return Promise.resolve(false);}}
 
@@ -279,8 +319,15 @@
   }
   function markDraft() {
     if (busy) return;
-    const changed = keyChanged || rememberChanged
+    const changed = keyChanged || rememberChanged || claudeKeyChanged
       || $("provider").value !== currentSettings.provider
+      || $("claude-model").value !== currentSettings.claudeModel
+      || $("claude-effort").value !== currentSettings.claudeEffort
+      || Number($("claude-max-searches").value) !== currentSettings.claudeMaxSearches
+      || Number($("claude-budget").value) !== currentSettings.claudeBudgetUsd
+      || Number($("claude-cycle-day").value) !== currentSettings.claudeCycleDay
+      || $("claude-auto-trigger").checked !== currentSettings.claudeAutoTrigger
+      || $("claude-triage").checked !== currentSettings.claudeTriage
       || buildSecretChanged || Number($("build-port").value) !== currentSettings.buildPort
       || $("build-model").value !== currentSettings.buildModel
       || $("build-reasoning-effort").value !== currentSettings.buildReasoningEffort
@@ -296,6 +343,7 @@
       || $("x-search").checked !== currentSettings.xSearch
       || $("language").value !== currentSettings.language
       || $("interface-language").value !== currentSettings.interfaceLanguage
+      || $("cache-retention").value !== currentSettings.answerCacheRetention
       || promptFields.some(field => $(field.id).value !== currentSettings[field.setting]);
     if (changed) setStatus("options.unsavedChanges");
     else if (statusMessage?.key === "options.unsavedChanges") {
@@ -351,7 +399,7 @@
     try {
       const stored = await chrome.storage.session.get("superxOptionsFocus");
       const request = stored.superxOptionsFocus;
-      if (!request || !["api-key","unlock-passphrase","build","oauth"].includes(request.id)
+      if (!request || !["api-key","unlock-passphrase","build","oauth","claude"].includes(request.id)
         || !["string","number"].includes(typeof request.nonce) || request.nonce === lastOptionsFocusNonce) return;
       if (busy) { optionsFocusPending = true;return; }
       lastOptionsFocusNonce = request.nonce;
@@ -365,6 +413,7 @@
         else if(oauthStatus.device&&!$("oauth-device").hidden&&$("oauth-official-link").getAttribute("href"))id="oauth-official-link";
         else id="provider";
       }
+      if(isClaude())id="claude-api-key";
       if($(id).hidden||$(id).disabled)id="provider";
       await chrome.storage.session.remove("superxOptionsFocus");
       $(id).scrollIntoView?.({block:"center",behavior:"instant"});
@@ -492,6 +541,7 @@
     renderSecurity();
     renderProvider();
     renderDiagnostics();
+    renderCacheStats();
     renderSearchFeedback();
     renderTriggers();
     for(const [id,error]of fieldErrors){if(error.errorId&&$(error.errorId))$(error.errorId).textContent=ui.t(error.key,uiLanguage,error.vars);}
@@ -502,6 +552,9 @@
     $("provider").value = settings.provider;
     $("build-port").value = settings.buildPort;
     populateBuildModels(settings.buildModel);populateBuildReasoning(settings.buildModel,settings.buildReasoningEffort);
+    populateClaudeModels(settings.claudeModel);$("claude-effort").value=settings.claudeEffort;
+    $("claude-max-searches").value=settings.claudeMaxSearches;$("claude-budget").value=settings.claudeBudgetUsd;
+    $("claude-cycle-day").value=settings.claudeCycleDay;$("claude-auto-trigger").checked=settings.claudeAutoTrigger;$("claude-triage").checked=settings.claudeTriage;
     populateOAuthModels(settings.oauthModel||"grok-4.3",settings.oauthReasoningEffort||"none");$("oauth-remember").checked=oauthLoaded?oauthStatus.remember:settings.oauthRemember!==false;
     $("explanation-mode").value = settings.explanationMode === "custom" ? "custom" : "preset";
     populateModels(settings.apiModel);
@@ -510,6 +563,7 @@
     $("analysis-dwell").value = settings.dwellMs / 1000;
     $("web-search").checked = settings.webSearch;
     $("x-search").checked = settings.xSearch;
+    $("cache-retention").value = settings.answerCacheRetention;
     for (const field of promptFields) $(field.id).value = settings[field.setting];
     populateLanguages(settings.language);
     populateInterfaceLanguages(settings.interfaceLanguage);
@@ -538,6 +592,7 @@
       try {const connection=await send({type:"GET_BUILD_CONNECTION"});buildConnection={configured:connection.configured===true,port:connection.port||currentSettings.buildPort};$("build-port").value=buildConnection.port;}catch{/* Existing API setup stays usable if the local connection is unavailable. */}
       try {await refreshSecurity(true);} catch(error) {if(currentSettings.provider==="api")throw error;}
       await refreshOAuthStatus();
+      if(currentSettings.provider==="claude")await refreshClaudeStatus();
       $("remember-key").checked = security.remember;
       if (localeRevision === revision) applyLanguage(locale?.language || local.uiLanguage || observedUILanguage);
       else renderLanguage();
@@ -546,7 +601,7 @@
     } finally { setBusy(false);await consumeOptionsFocus(); }
   }
   $("explanation-mode").addEventListener("change",() => { showExplanationMode();markDraft(); });
-  $("provider").addEventListener("change",() => { void cancelOAuthLoginOnProviderChange();renderProvider();markDraft();scheduleOAuthPoll();if(isOAuth())void refreshOAuthStatus(); });
+  $("provider").addEventListener("change",() => { void cancelOAuthLoginOnProviderChange();renderProvider();markDraft();scheduleOAuthPoll();if(isOAuth())void refreshOAuthStatus();if(isClaude())void refreshClaudeStatus(); });
   $("oauth-login").addEventListener("click",()=>oauthAction("OAUTH_LOGIN",{remember:$("oauth-remember").checked}));
   $("oauth-cancel").addEventListener("click",()=>oauthAction("OAUTH_CANCEL_LOGIN"));
   $("oauth-logout").addEventListener("click",()=>oauthAction("OAUTH_LOGOUT"));
@@ -609,7 +664,8 @@
   });
   $("interface-language").addEventListener("change",() => { renderLanguage();markDraft(); });
   $("api-model").addEventListener("change",() => { populateReasoning($("api-model").value,$("api-reasoning-effort").value);markDraft(); });
-  for (const id of ["build-reasoning-effort","api-reasoning-effort","api-concurrency","analysis-dwell","web-search","x-search","language",...promptFields.map(field => field.id)]) {
+  $("cache-retention").addEventListener("change",renderCacheStats);
+  for (const id of ["build-reasoning-effort","api-reasoning-effort","api-concurrency","analysis-dwell","web-search","x-search","language","cache-retention",...promptFields.map(field => field.id)]) {
     $(id).addEventListener("input",markDraft);
     $(id).addEventListener("change",markDraft);
   }
@@ -667,9 +723,8 @@
     if (busy) return;
     const triggerMode=formTriggerMode(),enabled=triggerMode!=="paused",provider=$("provider").value;
     const triggerChanged=triggerPreferencesChanged();
-    const modelId=isOAuth()?"oauth-model":isBuild()?"build-model":"api-model",effortId=isOAuth()?"oauth-reasoning-effort":isBuild()?"build-reasoning-effort":"api-reasoning-effort";
-    const modelField=isOAuth()?"oauthModel":isBuild()?"buildModel":"apiModel",effortField=isOAuth()?"oauthReasoningEffort":isBuild()?"buildReasoningEffort":"apiReasoningEffort";
-    const connectionChanged=isAPI()?keyNeedsSave():isBuild()&&(buildSecretChanged||Number($("build-port").value)!==buildConnection.port);
+    const {controls,fields}=core.providers.resolve(provider),modelId=controls.model,effortId=controls.effort,modelField=fields.model,effortField=fields.effort;
+    const connectionChanged=isClaude()?claudeKeyChanged:isAPI()?keyNeedsSave():isBuild()&&(buildSecretChanged||Number($("build-port").value)!==buildConnection.port);
     const strict=enabled&&(provider!==currentSettings.provider||$(modelId).value!==currentSettings[modelField]||$(effortId).value!==currentSettings[effortField]||$("web-search").checked!==currentSettings.webSearch||$("x-search").checked!==currentSettings.xSearch||connectionChanged);
     // A stale catalog or unfinished connection must not prevent pausing or
     // saving unrelated preferences. Native required checks still apply to
@@ -694,6 +749,13 @@
       oauthModel:enabled?$("oauth-model").value||currentSettings.oauthModel:currentSettings.oauthModel,
       oauthReasoningEffort:enabled?$("oauth-reasoning-effort").value||currentSettings.oauthReasoningEffort:currentSettings.oauthReasoningEffort,
       oauthRemember:$("oauth-remember").checked,
+      claudeModel:enabled?$("claude-model").value||currentSettings.claudeModel:currentSettings.claudeModel,
+      claudeEffort:enabled?$("claude-effort").value||currentSettings.claudeEffort:currentSettings.claudeEffort,
+      claudeMaxSearches:Number($("claude-max-searches").value),
+      claudeBudgetUsd:Number($("claude-budget").value),
+      claudeCycleDay:Number($("claude-cycle-day").value),
+      claudeAutoTrigger:$("claude-auto-trigger").checked,
+      claudeTriage:$("claude-triage").checked,
       explanationMode:$("explanation-mode").value,
       apiModel:enabled?$("api-model").value.trim()||currentSettings.apiModel:currentSettings.apiModel,
       apiReasoningEffort:enabled?$("api-reasoning-effort").value||currentSettings.apiReasoningEffort:currentSettings.apiReasoningEffort,
@@ -704,6 +766,7 @@
       xSearch:$("x-search").checked,
       language:$("language").value,
       interfaceLanguage:$("interface-language").value,
+      answerCacheRetention:$("cache-retention").value,
       verifyPrompt:$("verify-prompt").value,
       postDraftPrompt:$("post-draft-prompt").value,
       replyDraftPrompt:$("reply-draft-prompt").value,
@@ -722,6 +785,9 @@
       fieldError("build-secret","build.codeRequired");return;
     }
     if(strict&&isAPI()&&(!securityLoaded||!saveKey&&security.keyState!=="ready")){fieldError("api-key",securityLoaded?"options.keyRequired":"errors.noResponse");return;}
+    const claudeKey=$("claude-api-key").value.trim();
+    if(strict&&isClaude()&&!claudeStatus.configured&&!claudeKey){fieldError("claude-api-key","claude.keyRequired");return;}
+    if(isClaude()&&claudeKeyChanged&&claudeKey&&!/^sk-ant-[A-Za-z0-9_-]{8,490}$/.test(claudeKey)){fieldError("claude-api-key","claude.keyInvalid");return;}
     if(strict&&isOAuth()&&!oauthStatus.connected){fieldError("oauth-model",oauthStatus.errorKey||"oauth.needsLogin");return;}
     if(strict&&isBuild()&&buildStatus&&buildStatus.ready!==true){fieldError("build-secret",buildStateKey());return;}
     if (saveKey && !apiKey) {
@@ -757,7 +823,10 @@
       if(localPermission&&await localPermission!==true){setStatus("build.permission","error");return;}
       // Apply a replacement Key and its settings in one worker transaction.
       // A settings-only save never erases or replaces an untouched credential.
-      if (saveKey) {
+      if (isClaude()&&claudeKeyChanged&&claudeKey) {
+        claudeStatus=await send({type:"SAVE_CLAUDE_KEY",apiKey:claudeKey,settings,triggerPreferencesChanged:triggerChanged});
+        claudeKeyChanged=false;$("claude-api-key").value="";
+      } else if (saveKey) {
         await send({type:"SAVE_KEY",apiKey,remember,settings,triggerPreferencesChanged:triggerChanged});
         keyChanged = false;rememberChanged = false;
         originalKey = apiKey;
@@ -767,6 +836,7 @@
       } else await send({type:"SAVE_SETTINGS",settings,triggerPreferencesChanged:triggerChanged});
       currentSettings = settings;
       if (saveKey) await refreshSecurity();
+      if (isClaude()) await refreshClaudeStatus();
       if(strict)for(const id of [...fieldErrors.keys()])clearFieldError(id);
       if(enabled){populate(currentSettings);renderLanguage();}
       else {renderProvider();renderSearchFeedback();}
@@ -777,6 +847,21 @@
       await syncAfterSecurityAction(true);
     }
     finally { setBusy(false); }
+  });
+  $("claude-api-key").addEventListener("input",()=>{claudeKeyChanged=Boolean($("claude-api-key").value.trim());clearFieldError("claude-api-key");markDraft();});
+  for(const id of ["claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","claude-auto-trigger","claude-triage"])$(id).addEventListener(["claude-auto-trigger","claude-triage"].includes(id)||id.endsWith("model")||id.endsWith("effort")?"change":"input",()=>markDraft());
+  for(const id of ["claude-model","claude-auto-trigger"])$(id).addEventListener("change",()=>renderClaude());
+  $("clear-claude-key").addEventListener("click",async()=>{
+    if(busy||!isClaude())return;setBusy(true);
+    try{claudeStatus=await send({type:"CLEAR_CLAUDE_KEY"});$("claude-api-key").value="";claudeKeyChanged=false;setStatus("claude.keyCleared");}
+    catch(error){setStatus("errors.operation","error",{error:error.message});}
+    finally{setBusy(false);renderClaude();}
+  });
+  $("reset-claude-spend").addEventListener("click",async()=>{
+    if(busy)return;setBusy(true);
+    try{claudeStatus=await send({type:"RESET_CLAUDE_SPEND"});}
+    catch(error){setStatus("errors.operation","error",{error:error.message});}
+    finally{setBusy(false);renderClaude();}
   });
   $("clear-key").addEventListener("click",async () => {
     if (busy || !isAPI()) return;setBusy(true);
@@ -797,6 +882,8 @@
     catch (error) { setStatus("errors.operation","error",{error:error.message}); }
     finally { setBusy(false); }
   });
+  $("cache-stats-reset").addEventListener("click",() => { if (!busy) void refreshCacheStats("RESET_CACHE_STATS"); });
+  $("maintenance").addEventListener("toggle",() => { if ($("maintenance").open && !cacheStats) void refreshCacheStats(); });
   $("diagnostics-summary").addEventListener("click",()=>{if(!$("api-diagnostics").open)void refreshDiagnostics();});
   $("diagnostics-refresh").addEventListener("click",()=>refreshDiagnostics());
   $("diagnostics-copy").addEventListener("click",async()=>{

@@ -71,6 +71,16 @@ h2 { margin: 0; font-size: 20px; line-height: 1.4; }
 .answer-details { margin-top: 14px; }
 .answer-details > summary { width: fit-content; max-width: 100%; cursor: pointer; color: var(--accent); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .answer-body { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+.verdict { --v: var(--muted); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 10px; }
+.verdict[hidden] { display: none; }
+.verdict[data-verdict="accurate"] { --v: #00ba7c; }
+.verdict[data-verdict="inaccurate"] { --v: #f4212e; }
+.verdict[data-verdict="mixed"] { --v: #ffad1f; }
+.verdict-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; }
+.verdict-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--v); border: 1.5px solid var(--v); }
+.verdict[data-tentative] .verdict-dot, .verdict[data-verdict="unproven"] .verdict-dot, .verdict[data-verdict="none"] .verdict-dot { background: transparent; }
+.verdict-gaps { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.verdict-gaps span { cursor: help; }
 .answer-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .answer-warning { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .answer-markdown { min-width: 0; font-size: 15px; line-height: 1.6; overflow-wrap: anywhere; unicode-bidi: plaintext; }
@@ -86,6 +96,10 @@ h2 { margin: 0; font-size: 20px; line-height: 1.4; }
 .answer-markdown th, .answer-markdown td { min-width: 0; padding: 6px 9px; border: 1px solid var(--line); }
 .answer-markdown hr, .fact-check-divider { height: 1px; border: 0; background: var(--line); margin: 18px 0; }
 .answer-sources { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 16px; font-size: 13px; line-height: 1.5; }
+.source-mix { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.source-weak { display: block; color: var(--foreground); }
+.source-row { display: flex; align-items: baseline; gap: 6px; max-width: 100%; min-width: 0; }
+.tier { flex: none; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .comments-heading { margin: 20px 0 10px; font-size: 15px; line-height: 1.5; }
 .comment-copy { display: block; width: 100%; padding: 12px 0; border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--foreground); text-align: start; font-size: 14px; line-height: 1.55; white-space: pre-wrap; unicode-bidi: plaintext; }
 .comment-copy:hover { background: var(--hover); }

@@ -14,6 +14,7 @@ const setup = require('../extension/build-setup.js');
 const BUILD_SECRET='superx_'+'e'.repeat(64);
 const buildStoreProfiles=new WeakMap();
 const source = fs.readFileSync(path.join(__dirname, '../extension/background.js'), 'utf8');
+const claudeTransport = require('../extension/claude-transport.js');
 const clone = value => value === undefined ? undefined : structuredClone(value);
 const keyStoreProfiles = new WeakMap();
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -50,7 +51,9 @@ function storage(initial = {}, hooks = {}) {
   };
 }
 function createBackground(options = {}) {
-  const local = storage({ settings: { ...core.DEFAULT_SETTINGS, provider: options.native ? 'native' : 'api', ...options.settings }, ...options.local }, { get: options.localGet, set: options.localSet, remove: options.localRemove });
+  // Most tests here were written against the browser-session answer cache and
+  // seed or inspect session 'cache'; the persisted default has its own tests.
+  const local = storage({ settings: { ...core.DEFAULT_SETTINGS, answerCacheRetention: 'session', provider: options.native ? 'native' : 'api', ...options.settings }, ...options.local }, { get: options.localGet, set: options.localSet, remove: options.localRemove });
   const keyStoreState=options.keyStoreState||keyStoreProfiles.get(options.local)||{key:null};
   keyStoreProfiles.set(local.data,keyStoreState);
   const keyStoreCalls=[];
@@ -80,15 +83,21 @@ function createBackground(options = {}) {
     async clear(){buildStoreCalls.push('clear');if(options.buildClear)await options.buildClear();buildState.key=null;}
   };
   buildStoreProfiles.set(local.data,buildState);
+  const claudeStoreState=options.claudeStoreState||{key:null};
+  const claudeStore={envelopePresent:value=>value!==undefined,isEnvelope:value=>Boolean(value&&value.fixture==='claude'),
+    async seal(raw){claudeStoreState.key=raw;return {fixture:'claude'};},
+    async open(value){if(!claudeStore.isEnvelope(value)||!claudeStoreState.key)throw Error('Unavailable Claude Key');return claudeStoreState.key;},
+    async clear(){claudeStoreState.key=null;}};
   const cacheFixture=Object.hasOwn(options,'cache')?{cache:options.cache}:{};
   const session = storage(options.session === null ? cacheFixture : { apiKey: 'session-secret', ...cacheFixture, ...options.session }, { get: options.sessionGet, set: options.sessionSet, remove: options.sessionRemove });
-  const apiCalls = [], commentCalls = [], buildCalls=[], buildCommentCalls=[], buildStatusCalls=[], runtimeMessages = [], createdTabs = [], removedTabs = [], tabMessages = [], deadlines = [], createdWindows = [], removedWindows = [];
+  const apiCalls = [], triageCalls = [], commentCalls = [], buildCalls=[], buildCommentCalls=[], buildStatusCalls=[], runtimeMessages = [], createdTabs = [], removedTabs = [], tabMessages = [], deadlines = [], createdWindows = [], removedWindows = [];
   const tabs = new Map([[7, { id: 7, url: 'https://x.com/home', active: true, windowId: 1, status: 'complete' }], ...(options.tabs || [])]);
   const windows = new Map([[1, { id: 1, type: 'normal', focused: true }], ...(options.windows || [])]);
   let nextTabId = 50, nextWindowId = 600;
   const runtime = {
-    id: 'grokfirst-test', onConnect: event(), onMessage: event(),
+    id: 'grokfirst-test', onConnect: event(), onMessage: event(), onInstalled: event(),
     getURL: file => `chrome-extension://grokfirst-test/${file}`,
+    getManifest: () => ({ version: '1.1.6' }),
     async sendMessage(message) { runtimeMessages.push(clone(message)); return {ok:true}; },
     async openOptionsPage() { if(options.openOptionsPage)await options.openOptionsPage(harness); }
   };
@@ -145,7 +154,7 @@ function createBackground(options = {}) {
   let now = options.now ?? 1800000000000;
   class ClockDate extends Date { static now() { return now; } }
   const context = vm.createContext({
-    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
+    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXClaudeKeyStore:claudeStore,SuperXClaude:claudeTransport,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},STORAGE_KEY:'superxOAuthCredential',create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
     navigator: Object.hasOwn(options, 'navigator') ? options.navigator : { language: 'en-US' },
     SuperXBuild:{publicError:buildProvider.publicError,async close(){if(options.buildClose)await options.buildClose();},async status(input){buildStatusCalls.push(clone(input));return options.buildStatus?options.buildStatus(input):{connected:true,installed:true,available:true,authenticated:true,version:'1.0.60'};},
       async run(post,settings,callbacks){const call={post,settings,...callbacks};buildCalls.push(call);return options.buildRun?options.buildRun(call,harness):{text:'Checked '+post.id,provider:'build',searched:true,verificationStatus:'completed',model:'grok-4.7',usage:{total_tokens:17}};},
@@ -154,6 +163,9 @@ function createBackground(options = {}) {
     GrokFirstAPI: { mergeUsage:provider.mergeUsage,usageComplete:provider.usageComplete,safeUrl: provider.safeUrl, sanitizedUsage:provider.sanitizedUsage, sanitizedMetadata:provider.sanitizedMetadata, sanitizedVerificationFailure:provider.sanitizedVerificationFailure, publicError:provider.publicError, validateComments:provider.validateComments, async generateComments(post,settings,key,callbacks) {
       const call={post,settings,key,...callbacks};commentCalls.push(call);
       return options.commentRun?options.commentRun(call,harness):{comments:['First view '+post.id+'.','Second view '+post.id+'.','Third view '+post.id+'.'],provider:'api',task:'comments'};
+    }, async triage(post, settings, key, callbacks) {
+      const call = { post, settings, key, ...callbacks }; triageCalls.push(call);
+      return options.triageRun ? options.triageRun(call, harness) : { triage: { checkable: 'yes', kind: 'factual', difficulty: 'simple', signals: [] }, provider: 'claude', model: 'claude-haiku-5-5', usage: { input_tokens: 400, output_tokens: 20, total_tokens: 420, cost_in_usd_ticks: 5e6 }, usageComplete: true };
     }, async run(post, settings, key, callbacks) {
       const call = { post, settings, key, ...callbacks }; apiCalls.push(call);
       return options.apiRun ? options.apiRun(call, harness) : { text: `Explanation ${post.id}`, sources: [], provider: 'api', searched: false };
@@ -166,7 +178,7 @@ function createBackground(options = {}) {
     clearTimeout(timer) { if (timer?.immediate) clearImmediate(timer.immediate); if (timer?.deadline) timer.cancelled = true; }
   });
   const harness = {
-    chrome, permissionState, local, session, alarmCalls,oauthManager,oauthCalls, buildStore,buildState,buildStoreCalls, keyStore:options.keyStore||keyStore, keyStoreState, keyStoreCalls, apiCalls, commentCalls, buildCalls,buildCommentCalls,buildStatusCalls,runtimeMessages, createdTabs, removedTabs, tabMessages, tabs, windows, createdWindows, removedWindows, deadlines,
+    chrome, permissionState, local, session, alarmCalls,oauthManager,oauthCalls, buildStore,buildState,buildStoreCalls, keyStore:options.keyStore||keyStore, keyStoreState, keyStoreCalls, apiCalls, triageCalls, commentCalls, buildCalls,buildCommentCalls,buildStatusCalls,runtimeMessages, createdTabs, removedTabs, tabMessages, tabs, windows, createdWindows, removedWindows, deadlines,
     now() { return now; },
     runtimeCounts() { return clone(vm.runInContext('({jobs:jobs.size,queued:queue.length,running:runningJobs.size})',context)); },
     advance(ms) { now += ms; },
@@ -910,8 +922,8 @@ test('checking native status during a long Build task reuses confirmed status an
 });
 async function analyze(harness, port, requestId, id = 100, extra = {}) {
   port.send({ type: 'ANALYZE', requestId, post: post(id), ...extra });
-  await until(() => port.messages.some(message => message.requestId === requestId && ['RESULT', 'ERROR'].includes(message.type)), requestId);
-  return port.messages.findLast(message => message.requestId === requestId && ['RESULT', 'ERROR'].includes(message.type));
+  await until(() => port.messages.some(message => message.requestId === requestId && ['RESULT', 'ERROR', 'TRIAGE_SKIP'].includes(message.type)), requestId);
+  return port.messages.findLast(message => message.requestId === requestId && ['RESULT', 'ERROR', 'TRIAGE_SKIP'].includes(message.type));
 }
 async function draftComments(harness,port,requestId,id=100,extra={}) {
   port.send({type:'GENERATE_COMMENTS',requestId,post:post(id),...extra});
@@ -1482,7 +1494,7 @@ test('0.6.1 API analysis caches regenerate naturally in every mode and fresh ans
   const oldVerify='Write only a concise fact-check section with its own heading, no more than six short sentences excluding citations. Do not repeat the earlier explanation. The earlier explanation is unverified and may be wrong; explicitly correct it if the evidence requires.';
   const input={...post(100),text:'The author recommends a useful new tool.',language:'en'};
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({provider:'api',explanationMode:mode,
+    const s=core.normalizeSettings({provider:'api',answerCacheRetention:'session',explanationMode:mode,
       explainPrompt:'User draft: explain the practical implications.',
       verifyPrompt:'User draft: check the central claim.'});
     const oldInput=mode==='url'?JSON.stringify(['url-input-v2',input.url,'en']):core.postFingerprint(input);
@@ -1516,7 +1528,7 @@ test('comments cached before explicit reasoning selection cannot substitute for 
   const analysis={text:'An existing explanation.',verificationStatus:'completed',warning:'',sources:[]};
   const comments=['A practical example would help.','Which step would you try first?','The workflow seems useful.'];
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({provider:'api',explanationMode:mode});
+    const s=core.normalizeSettings({provider:'api',answerCacheRetention:'session',explanationMode:mode});
     const oldPrompts=['comments-prompt-v1',s.commentsPrompt,...(mode==='url'?['url-display-language-v2']:[])];
     const oldKey=JSON.stringify(['GrokFirst-comments-v2-language','api',s.apiModel,s.language,core.postFingerprint(input),analysis,...oldPrompts]);
     const bg=createBackground({settings:s,cache:{[oldKey]:{completedAt:1800000000000,comments,provider:'api',task:'comments'}}});
@@ -1531,7 +1543,7 @@ test('comments cached before explicit reasoning selection cannot substitute for 
 test('0.6.2 excerpt-based caches cannot substitute for full-post answers in any API style',async()=>{
   const input={...post(100),text:'This is only the folded beginning of the post.',language:'en'};
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({explanationMode:mode,explainPrompt:'Retained user explanation.',verifyPrompt:'Retained user verification.'});
+    const s=core.normalizeSettings({answerCacheRetention:'session',explanationMode:mode,explainPrompt:'Retained user explanation.',verifyPrompt:'Retained user verification.'});
     const oldInput=mode==='url'?JSON.stringify(['url-input-v2',input.url,'en']):core.postFingerprint(input);
     const prompts=mode==='url'?[]:['prompts-v1',mode==='preset'?core.DEFAULT_PROMPTS.explain:s.explainPrompt,mode==='preset'?core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
     const oldKey=JSON.stringify(['GrokFirst-v1','api',s.apiModel,s.language,s.webSearch,s.xSearch,'api-v5-natural',mode,mode==='url'?'natural-url-v3-natural':s.apiVerification,oldInput,...prompts]);
@@ -1560,7 +1572,7 @@ test('0.6.4 API process narration caches regenerate in every mode and reader-fac
   const oldExplain='Explain what is interesting, confusing or missing in this post, adding only context that helps the reader understand it. Start directly with the useful explanation and keep it concise. Let the post determine the form; avoid a generic post-summary, classification checklist or disclaimer section.';
   const oldVerify='Check the specific claims that matter for understanding this post and add only useful findings or corrections. Keep the update concise, cite evidence beside the relevant finding, and place any necessary caveat beside its claim. Do not repeat the earlier explanation or add a stock fact-check or disclaimer section. The earlier explanation may be wrong; correct it when the evidence warrants.';
   for(const mode of ['preset','custom']) {
-    const s=core.normalizeSettings({explanationMode:mode,language:'auto',
+    const s=core.normalizeSettings({answerCacheRetention:'session',explanationMode:mode,language:'auto',
       explainPrompt:'  Retain my custom explanation.\nUse a concise analogy.  ',
       verifyPrompt:' Retain my custom evidence task. '});
     const oldInput=JSON.stringify(['post-input-v3-full-url',input.url,'en']);
@@ -1736,7 +1748,7 @@ test('switching explanation style cancels the accepted old stream and ignores it
   const held=deferred(),bg=createBackground({settings:{explanationMode:'custom'},apiRun:async call=>{if(call.settings.explanationMode==='custom')await held.promise;return {text:call.settings.explanationMode+' result',provider:'api'};}});
   await bg.ready();const port=bg.connect();port.send({type:'ANALYZE',requestId:'url-in-flight',post:post(100)});
   await until(()=>bg.apiCalls.length===1);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',explanationMode:'preset'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',explanationMode:'preset'}});
   assert.equal(bg.apiCalls[0].signal.aborted,true);
   held.resolve();await tick();await tick();
   assert.equal(port.messages.some(value=>value.requestId==='url-in-flight'&&value.type==='RESULT'),false);
@@ -2438,7 +2450,7 @@ test('comment cache is distinct from explanations and changes with source eviden
   port.send({type:'SET_LANGUAGE',language:'ja'});
   await until(()=>port.messages.findLast(message=>message.type==='CONFIG')?.settings.language==='ja');
   assert.equal((await draftComments(bg,port,'japanese-drafts',100,{analysis:changed})).cached,false);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',language:'ja',apiModel:'custom-model'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',language:'ja',apiModel:'custom-model'}});
   assert.equal((await draftComments(bg,port,'custom-model-drafts',100,{analysis:changed})).cached,false);
   assert.equal(bg.commentCalls.length,5);
   assert.equal(bg.session.data.quotas[7],1);
@@ -3052,7 +3064,7 @@ test('reasoning levels partition both Fact Check and comment caches and restore 
     apiRun:async call=>({text:'Evidence at '+call.settings.apiReasoningEffort,provider:'api'}),
     commentRun:async call=>({comments:['First '+call.settings.apiReasoningEffort+'.','Second '+call.settings.apiReasoningEffort+'.','Third '+call.settings.apiReasoningEffort+'.'],provider:'api'})});
   await bg.ready();const port=bg.connect();
-  const settings=effort=>({...core.DEFAULT_SETTINGS,provider:'api',apiModel:'grok-4.7',apiReasoningEffort:effort});
+  const settings=effort=>({...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',apiModel:'grok-4.7',apiReasoningEffort:effort});
   for(const [index,effort] of ['low','high','low'].entries()){
     await bg.message({type:'SAVE_SETTINGS',settings:settings(effort)});
     const analysis=await analyze(bg,port,'effort-check-'+index),comments=await draftComments(bg,port,'effort-comments-'+index);
@@ -3069,7 +3081,7 @@ test('saving a reasoning-only change cancels old accepted work and new work uses
     if(call.settings.apiReasoningEffort==='low')await gate.promise;
     return{text:'Evidence at '+call.settings.apiReasoningEffort,provider:'api'};
   }});await bg.ready();const port=bg.connect();port.send({type:'ANALYZE',requestId:'effort-old',post:post(100)});await until(()=>bg.apiCalls.length===1);
-  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,provider:'api',apiModel:'grok-4.7',apiReasoningEffort:'xhigh'}});
+  await bg.message({type:'SAVE_SETTINGS',settings:{...core.DEFAULT_SETTINGS,answerCacheRetention:'session',provider:'api',apiModel:'grok-4.7',apiReasoningEffort:'xhigh'}});
   assert.equal(bg.apiCalls[0].signal.aborted,true);assert.equal(bg.local.data.settings.apiReasoningEffort,'xhigh');
   assert.equal((await analyze(bg,port,'effort-new')).result.text,'Evidence at xhigh');gate.resolve();await tick();await tick();
   assert.equal(port.messages.some(m=>m.requestId==='effort-old'&&m.type==='RESULT'),false);
@@ -4106,4 +4118,625 @@ test('custom-trigger guide ignores untrusted completion messages and unrelated a
   await lookupCachedPost(bg,port,'no-implicit-guide-cache');await tick();
   assert.equal((await bg.message({type:'GET_CONFIG'})).triggerGuideCompleted,false);
   assert.equal(writes.length,0);
+});
+
+test('Claude: saved Key enables manual checks, records estimated cost and stops at the cycle budget',async()=>{
+  const ticks=claudeTransport.USD_TICKS;
+  const bg=createBackground({session:null,settings:{provider:'claude',claudeBudgetUsd:1,claudeCycleDay:15},
+    apiRun:async call=>({text:'Claude finding '+call.post.id,sources:[],provider:'claude',searched:true,verificationStatus:'completed',model:'claude-haiku-5-5',usage:{total_tokens:10,cost_in_usd_ticks:0.6*ticks}})});
+  await bg.ready();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'));
+  assert.equal(port.messages.findLast(value=>value.type==='CONFIG').ready,false);
+  const invalid=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'xai-not-a-claude-key'});
+  assert.equal(invalid.ok,false);assert.equal(invalid.errorKey,'claude.keyInvalid');
+  const saved=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-api03-background-fixture'});
+  assert.equal(saved.ok,true);assert.equal(saved.configured,true);assert.equal(saved.usd,0);assert.equal(saved.budgetUsd,1);
+  assert.deepEqual(bg.local.data.claudeApiKeyEncrypted,{fixture:'claude'});
+  assert.ok(!JSON.stringify(bg.local.data).includes('sk-ant-api03-background-fixture'));
+  await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready&&value.claudeStatus?.configured));
+  // Automatic triggers stay closed for Claude; the post button still works.
+  assert.equal((await analyze(bg,port,'claude-auto',100,{triggerKind:'automatic'})).code,'TRIGGER_DISABLED');
+  const first=await analyze(bg,port,'claude-manual',101,{triggerKind:'manual'});
+  assert.equal(first.type,'RESULT');assert.equal(bg.apiCalls.length,1);
+  assert.equal(bg.apiCalls[0].key,'sk-ant-api03-background-fixture');assert.equal(bg.apiCalls[0].settings.provider,'claude');
+  let status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.ok(Math.abs(status.usd-0.6)<1e-9);assert.equal(status.requests,1);assert.equal(status.exhausted,false);
+  await analyze(bg,port,'claude-manual-2',102,{triggerKind:'manual'});
+  status=await bg.message({type:'GET_CLAUDE_STATUS'});assert.equal(status.exhausted,true);assert.equal(status.requests,2);
+  const blocked=await analyze(bg,port,'claude-blocked',103,{triggerKind:'manual'});
+  assert.equal(blocked.type,'ERROR');assert.equal(blocked.code,'CLAUDE_BUDGET');assert.equal(bg.apiCalls.length,2);
+  const reset=await bg.message({type:'RESET_CLAUDE_SPEND'});assert.equal(reset.usd,0);assert.equal(reset.exhausted,false);
+  const cleared=await bg.message({type:'CLEAR_CLAUDE_KEY'});assert.equal(cleared.configured,false);
+  assert.equal(bg.local.data.claudeApiKeyEncrypted,undefined);
+});
+
+test('Claude: an encrypted Key is restored after a worker restart',async()=>{
+  const claudeStoreState={key:'sk-ant-api03-restored-fixture'};
+  const bg=createBackground({session:null,claudeStoreState,local:{settings:{provider:'claude'},claudeApiKeyEncrypted:{fixture:'claude'},claudeSpend:{cycleStart:0,usd:5,requests:3}}});
+  await bg.ready();
+  const status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.equal(status.configured,true);
+  // Spend from an older cycle does not count against the current one.
+  assert.equal(status.usd,0);
+});
+
+// WP3: the free pre-screen for every connection, the paid Claude screen and
+// Auto routing. The worker's GrokFirstAPI.triage is a fixture here; the real
+// request and parser are covered in triage.test.js.
+const SCREEN_USAGE={input_tokens:400,output_tokens:20,total_tokens:420,cost_in_usd_ticks:5e6};
+const screen=(triage,extra={})=>async()=>({triage:{difficulty:'simple',signals:[],...triage},model:'claude-haiku-5-5',usage:SCREEN_USAGE,usageComplete:true,...extra});
+const claudeAnswer=async call=>({text:'Claude finding '+call.post.id,sources:[],provider:'claude',searched:true,verificationStatus:'completed',
+  model:core.providerModel(call.settings),usage:{input_tokens:900,output_tokens:100,total_tokens:1000,cost_in_usd_ticks:3e8},usageComplete:true});
+async function readyBackground(provider,settings={},options={}){
+  const bg=createBackground({oauthState:oauthConnected(),claudeStoreState:{key:'sk-ant-api03-triage-fixture'},apiRun:provider==='claude'?claudeAnswer:undefined,...options,
+    settings:{provider,claudeAutoTrigger:true,...settings},local:provider==='claude'?{claudeApiKeyEncrypted:{fixture:'claude'},...options.local}:undefined});
+  await bg.ready();if(provider==='build')await bg.configureBuild();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready),provider+' ready');
+  return {bg,port};
+}
+async function analyzePost(bg,port,requestId,value,extra={}){
+  port.send({type:'ANALYZE',requestId,post:value,...extra});
+  await until(()=>port.messages.some(message=>message.requestId===requestId&&['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type)),requestId);
+  return port.messages.findLast(message=>message.requestId===requestId&&['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type));
+}
+const sentFor=(port,requestId)=>port.messages.filter(message=>message.requestId===requestId).map(message=>message.type);
+
+test('the free pre-screen skips automatic checks of trivially short posts on every connection, never a click',async()=>{
+  for(const provider of ['api','oauth','build','claude']){
+    const {bg,port}=await readyBackground(provider),calls=()=>provider==='build'?bg.buildCalls:bg.apiCalls;
+    const short={...post(300),text:'lol 😂 https://example.com/x'};
+    const skipped=await analyzePost(bg,port,'short-'+provider,short,{triggerKind:'automatic'});
+    assert.equal(skipped.type,'TRIAGE_SKIP',provider);assert.deepEqual(skipped.triage,{kind:'short',local:true},provider);
+    assert.deepEqual(sentFor(port,'short-'+provider),['TRIAGE_SKIP'],'No job is queued or started');
+    assert.equal(calls().length,0,provider);assert.equal(bg.triageCalls.length,0,provider);
+    assert.equal((await analyzePost(bg,port,'short-click-'+provider,short,{triggerKind:'manual'})).type,'RESULT',provider);
+    assert.equal(calls().length,1,provider);assert.equal(bg.triageCalls.length,0,'A click is never screened');
+    assert.equal(bg.runtimeCounts().jobs,0,provider);
+  }
+});
+
+test('Claude: a paid screen with no claim skips the automatic check and is reused, never cached or recorded as an answer',async()=>{
+  const {bg,port}=await readyBackground('claude',{},{triageRun:screen({checkable:'no',kind:'opinion'})});
+  await visitHistory(bg,port,[100]);
+  const skipped=await analyze(bg,port,'opinion',100,{triggerKind:'automatic'});
+  assert.equal(skipped.type,'TRIAGE_SKIP');assert.deepEqual(skipped.triage,{kind:'opinion',local:false});
+  assert.equal(bg.triageCalls.length,1);assert.equal(bg.triageCalls[0].key,'sk-ant-api03-triage-fixture');assert.equal(bg.apiCalls.length,0);
+  assert.ok(port.messages.some(message=>message.requestId==='opinion'&&message.type==='UPDATE'&&message.phase==='triage'));
+  assert.deepEqual(skipped.usageByStage,{triage:SCREEN_USAGE});assert.equal(skipped.model,'claude-haiku-5-5');
+  let status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.equal(status.requests,1);assert.ok(Math.abs(status.usd-0.0005)<1e-9,'The screen counts against the budget');
+  await until(()=>Object.keys(bg.session.data.claudeTriageCache||{}).length===1,'screen cache write');
+  assert.equal(Object.keys(bg.session.data.cache||{}).length,0);
+  assert.equal(bg.local.data.superxHistory[0].analysis,undefined);
+  const again=await analyze(bg,port,'opinion-again',100,{triggerKind:'automatic'});
+  assert.equal(again.type,'TRIAGE_SKIP');assert.deepEqual(sentFor(port,'opinion-again'),['TRIAGE_SKIP']);assert.equal(bg.triageCalls.length,1);
+  // Check anyway is an explicit check; with a fixed model it is never screened.
+  assert.equal((await analyze(bg,port,'anyway',100,{triggerKind:'recheck'})).type,'RESULT');
+  assert.equal(bg.apiCalls.length,1);assert.equal(bg.triageCalls.length,1);
+  status=await bg.message({type:'GET_CLAUDE_STATUS'});assert.equal(status.requests,2);
+  assert.equal((await bg.message({type:'CLEAR_CACHE'})).ok,true);
+  assert.equal(bg.session.data.claudeTriageCache,undefined);
+  assert.equal((await analyze(bg,port,'after-clear',100,{triggerKind:'automatic'})).type,'TRIAGE_SKIP');assert.equal(bg.triageCalls.length,2);
+});
+
+test('Claude Auto: a hard post is routed to Sonnet and the card bills the screen and the check together',async()=>{
+  const {bg,port}=await readyBackground('claude',{claudeModel:'auto'},{triageRun:screen({checkable:'yes',kind:'factual',difficulty:'hard'})});
+  const result=await analyze(bg,port,'hard',100,{triggerKind:'automatic'});
+  assert.equal(result.type,'RESULT');assert.equal(bg.triageCalls.length,1);assert.equal(bg.apiCalls.length,1);
+  assert.equal(bg.apiCalls[0].settings.claudeRoute,'claude-sonnet-5-5');assert.equal(core.providerModel(bg.apiCalls[0].settings),'claude-sonnet-5-5');
+  assert.deepEqual(result.result.claudeRoute,{model:'claude-sonnet-5-5',reason:'hard'});
+  assert.equal(result.result.usageByStage.triage.total_tokens,420);assert.equal(result.result.usageByStage.verify.total_tokens,1000);
+  assert.equal(result.result.usage.total_tokens,1420);assert.equal(result.result.model,'claude-sonnet-5-5');
+  assert.equal(result.result.modelByStage.triage,'claude-haiku-5-5');
+  assert.equal((await bg.message({type:'GET_CLAUDE_STATUS'})).requests,2);
+  assert.equal(bg.local.data.settings.claudeModel,'auto');assert.equal(Object.hasOwn(bg.local.data.settings,'claudeRoute'),false);
+  // The answer key holds 'auto', so a saved answer is found before any screen.
+  const cached=await analyze(bg,port,'hard-again',100,{triggerKind:'automatic'});
+  assert.equal(cached.cached,true);assert.deepEqual(cached.result.claudeRoute,{model:'claude-sonnet-5-5',reason:'hard'});
+  assert.equal(bg.triageCalls.length,1);assert.equal(bg.apiCalls.length,1);
+});
+
+test('Claude: clicks are screened only under Auto, and only to pick the model',async()=>{
+  const fixed=await readyBackground('claude',{claudeAutoTrigger:false},{triageRun:screen({checkable:'no',kind:'joke'})});
+  assert.equal((await analyze(fixed.bg,fixed.port,'fixed-click',100,{triggerKind:'manual'})).type,'RESULT');
+  assert.equal(fixed.bg.triageCalls.length,0);assert.equal(fixed.bg.apiCalls[0].settings.claudeRoute,undefined);
+  const auto=await readyBackground('claude',{claudeAutoTrigger:false,claudeModel:'auto'},{triageRun:screen({checkable:'no',kind:'joke'})});
+  const clicked=await analyze(auto.bg,auto.port,'auto-click',100,{triggerKind:'manual'});
+  assert.equal(clicked.type,'RESULT','A click is answered even when the screen finds no claim');
+  assert.equal(auto.bg.triageCalls.length,1);assert.deepEqual(clicked.result.claudeRoute,{model:'claude-haiku-5-5',reason:'simple'});
+  const short=await analyzePost(auto.bg,auto.port,'auto-short-click',{...post(101),text:'lol'},{triggerKind:'manual'});
+  assert.deepEqual(short.result.claudeRoute,{model:'claude-haiku-5-5',reason:'short'});assert.equal(auto.bg.triageCalls.length,1,'A local screen costs nothing');
+  const comments=await draftComments(auto.bg,auto.port,'auto-comments',100,{analysis:{text:'Checked.'}});
+  assert.equal(comments.type,'COMMENT_RESULT');assert.equal(auto.bg.triageCalls.length,1,'Comment drafts are never screened');
+});
+
+test('Claude: a failed screen fails open to Haiku, while errors the check would hit too pass through',async()=>{
+  const unreadable=Object.assign(new Error('unreadable'),{code:'API_INCOMPLETE',usage:SCREEN_USAGE,usageComplete:true,model:'claude-haiku-5-5'});
+  const failing=await readyBackground('claude',{claudeModel:'auto'},{triageRun:async()=>{throw unreadable;}});
+  const fallback=await analyze(failing.bg,failing.port,'fallback',100,{triggerKind:'automatic'});
+  assert.equal(fallback.type,'RESULT','A failed screen never skips a post');
+  assert.deepEqual(fallback.result.claudeRoute,{model:'claude-haiku-5-5',reason:'fallback'});
+  assert.equal(fallback.result.usageByStage.triage.total_tokens,420,'A failed screen still shows what it cost');
+  assert.equal((await failing.bg.message({type:'GET_CLAUDE_STATUS'})).requests,2);
+  await tick();assert.equal(failing.bg.session.data.claudeTriageCache,undefined,'Failed screens are not cached');
+  // The harness runs the 10 s screen timer at once; only the screen is aborted.
+  const slow=await readyBackground('claude',{claudeModel:'auto'},{triageRun:call=>new Promise((resolve,reject)=>call.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{code:'CANCELED',name:'AbortError'}))))});
+  const timedOut=await analyze(slow.bg,slow.port,'slow',100,{triggerKind:'automatic'});
+  assert.equal(timedOut.type,'RESULT');assert.deepEqual(timedOut.result.claudeRoute,{model:'claude-haiku-5-5',reason:'fallback'});
+  for(const [label,error] of [['rate',Object.assign(new Error('limited'),{code:'RATE_LIMIT'})],['auth',Object.assign(new Error('denied'),{code:'API_ERROR',requestDiagnostics:{failureOrigin:'http',transportStatus:401}})]]){
+    const {bg,port}=await readyBackground('claude',{},{retryLimit:0,triageRun:async()=>{throw error;}});
+    const failed=await analyze(bg,port,'pass-'+label,100,{triggerKind:'automatic'});
+    assert.equal(failed.type,'ERROR',label);assert.equal(failed.code,error.code,label);assert.equal(bg.apiCalls.length,0,label);
+  }
+  const budget=await readyBackground('claude',{},{local:{claudeSpend:{cycleStart:core.claudeCycle(1800000000000,15).start,usd:150,requests:9}}});
+  assert.equal((await analyze(budget.bg,budget.port,'budget',100,{triggerKind:'automatic'})).code,'CLAUDE_BUDGET');
+  assert.equal(budget.bg.triageCalls.length,0,'An exhausted budget sends no screen either');
+});
+
+test('Claude: a retried check reuses its screen instead of paying for another',async()=>{
+  let attempts=0;
+  const {bg,port}=await readyBackground('claude',{claudeModel:'auto'},{triageRun:screen({checkable:'yes',kind:'factual'}),apiRun:async call=>{
+    if(++attempts===1)throw Object.assign(new Error('limited'),{code:'RATE_LIMIT'});
+    return claudeAnswer(call);
+  }});
+  const result=await analyze(bg,port,'retried',100,{triggerKind:'automatic'});
+  assert.equal(result.type,'RESULT');assert.ok(port.messages.some(message=>message.requestId==='retried'&&message.type==='RETRY_WAIT'));
+  assert.equal(bg.apiCalls.length,2);assert.equal(bg.triageCalls.length,1);
+  assert.equal(result.result.usageByStage.triage.total_tokens,420,'The screen is billed once');
+  assert.deepEqual(result.result.claudeRoute,{model:'claude-haiku-5-5',reason:'simple'});
+});
+
+test('Claude: history keeps a Claude answer with Claude and hides it from the xAI Key',async()=>{
+  const {bg,port}=await readyBackground('claude');
+  await visitHistory(bg,port,[100]);
+  assert.equal((await analyzePost(bg,port,'claude-history',post(100))).type,'RESULT');
+  await until(()=>bg.local.data.superxHistory?.[0]?.analysis);
+  assert.equal(bg.local.data.superxHistory[0].analysis.scope,'claude');
+  assert.equal((await bg.message({type:'GET_HISTORY'})).entries[0].analysis.text,'Claude finding 100');
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,provider:'api'}})).ok,true);
+  assert.equal((await bg.message({type:'GET_HISTORY'})).entries[0].analysis,undefined);
+});
+
+// Golden characterization for the provider registry (WP7-P0). The stored
+// cache key strings and Settings focus below were recorded before the
+// registry existed and must stay byte-identical through it.
+const GOLDEN_PROVIDER_SETTINGS={
+  api:{apiModel:'grok-4.7',apiReasoningEffort:'high'},
+  oauth:{oauthModel:'grok-4.7',oauthReasoningEffort:'low'},
+  build:{buildModel:'grok-4.7',buildReasoningEffort:'high',buildDefaultsVersion:1},
+  claude:{claudeModel:'claude-sonnet-5-5',claudeEffort:'high',claudeMaxSearches:5}
+};
+const GOLDEN_CACHE_IDENTITY={
+  api:['grok-4.7','high'],
+  oauth:[[OAUTH_ACCOUNT_A,'grok-4.7'],'low'],
+  build:[['official-ws-v1',2419,'grok-4.7'],'high'],
+  // WP4 bumped the Claude analysis key once, to v2 plus the links, Community
+  // Note and truncation it reads. Comment keys keep the v1 identity.
+  claude:[['claude-messages-v2','claude-sonnet-5-5',5,'[[],"",false]'],'high',['claude-messages-v1','claude-sonnet-5-5',5]]
+};
+async function goldenProviderBackground(provider){
+  const bg=createBackground({settings:{provider,language:'ja',...GOLDEN_PROVIDER_SETTINGS[provider]},oauthState:oauthConnected(),
+    claudeStoreState:{key:'sk-ant-api03-golden-fixture'},local:provider==='claude'?{claudeApiKeyEncrypted:{fixture:'claude'}}:undefined});
+  await bg.ready();if(provider==='build')await bg.configureBuild();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready),provider+' ready');
+  return {bg,port};
+}
+
+test('golden: analysis and comment cache keys per provider are byte-identical stored strings',async()=>{
+  for(const provider of ['api','oauth','build','claude']){
+    const {bg,port}=await goldenProviderBackground(provider),[identity,effort,commentIdentity=identity]=GOLDEN_CACHE_IDENTITY[provider];
+    assert.equal((await analyze(bg,port,'golden-analysis-'+provider,100,{triggerKind:'manual'})).type,'RESULT',provider);
+    assert.equal((await draftComments(bg,port,'golden-comments-'+provider,100,{analysis:{text:'Checked.'}})).type,'COMMENT_RESULT',provider);
+    await until(()=>Object.keys(bg.session.data.cache||{}).length===2,provider+' cache write');
+    const analysisKey=JSON.stringify(['GrokFirst-v1',provider,identity,'ja',true,true,'api-v11-context-images','preset','only',
+      JSON.stringify(['post-input-v4-source-full-url',provider,'https://x.com/author/status/100','ja']),
+      'fact-check-prompts-v2-deeper',core.DEFAULT_PROMPTS.verify,effort]);
+    const commentKey=JSON.stringify(['GrokFirst-comments-v2-language',provider,commentIdentity,'ja',
+      JSON.stringify([['100','Claim 100','','','',false,[]],[]]),
+      {text:'Checked.',verificationStatus:'',warning:'',sources:[]},'comments-prompt-v1',core.DEFAULT_PROMPTS.comments,effort]);
+    assert.deepEqual(Object.keys(bg.session.data.cache).sort(),[analysisKey,commentKey].sort(),provider);
+  }
+});
+
+test('golden: OPEN_SETTINGS focus precedence for every requested focus and provider',async()=>{
+  const requested=[undefined,'api-key','oauth','build','claude'];
+  const expected={
+    api:['api-key','api-key','oauth','build','claude'],
+    oauth:['oauth','oauth','oauth','oauth','oauth'],
+    build:['build','build','oauth','build','build'],
+    claude:['claude','claude','oauth','build','claude']
+  };
+  for(const [provider,ids] of Object.entries(expected)){
+    const opened=[],bg=createBackground({settings:{provider},openOptionsPage:h=>opened.push(h.session.data.superxOptionsFocus.id)});await bg.ready();
+    for(const focus of requested)assert.equal((await bg.message({type:'OPEN_SETTINGS',focus})).ok,true);
+    assert.deepEqual(opened,ids,provider);
+  }
+});
+
+test('streamed verdicts are forwarded as an enum or null, and results keep verdict and gaps through the cache', async () => {
+  const bg = createBackground({ apiRun: async call => {
+    call.onUpdate({ text: 'First finding.', verdict: 'mixed', phase: 'verify', verificationStatus: 'running', sources: [] });
+    call.onUpdate({ text: 'Reset after a search.', verdict: 'confident', phase: 'verify', verificationStatus: 'running', sources: [] });
+    return { text: 'Final finding.', verdict: 'accurate', gaps: ['media', 'search'], sources: [], provider: 'api', searched: false, verificationStatus: 'unverified' };
+  } });
+  await bg.ready(); const port = bg.connect();
+  const result = await analyze(bg, port, 'verdict-stream');
+  assert.deepEqual(port.messages.filter(message => message.type === 'UPDATE').map(message => message.verdict), ['mixed', null]);
+  assert.equal(result.result.verdict, 'accurate'); assert.deepEqual(result.result.gaps, ['media', 'search']);
+  const cached = await analyze(bg, port, 'verdict-cached');
+  assert.equal(cached.cached, true); assert.equal(cached.result.verdict, 'accurate'); assert.deepEqual(cached.result.gaps, ['media', 'search']);
+});
+
+test('analysis passed back to the worker keeps only a valid verdict and known gaps', async () => {
+  const bg = createBackground(); await bg.ready(); const port = bg.connect();
+  await draftComments(bg, port, 'verdict-analysis', 100, { analysis: { text: 'Checked.', verdict: 'certainly', gaps: ['search', 'smell', 'text'] } });
+  assert.deepEqual(clone(bg.commentCalls[0].analysis), { text: 'Checked.', verificationStatus: '', warning: '', sources: [], gaps: ['text', 'search'] });
+  await draftComments(bg, port, 'verdict-analysis-valid', 101, { analysis: { text: 'Checked.', verdict: 'none' } });
+  assert.equal(bg.commentCalls[1].analysis.verdict, 'none'); assert.equal(Object.hasOwn(bg.commentCalls[1].analysis, 'gaps'), false);
+});
+
+test('a checked post keeps only well-formed links and a bounded Community Note, dropping bad entries silently', async () => {
+  const bg = createBackground(); await bg.ready(); const port = bg.connect();
+  const links = [{url:'javascript:alert(1)'},{url:'data:text/html,hi'},{url:'https://user:pw@example.com/'},{url:'https://example.com/'+'a'.repeat(2048)},
+    'not an object',{url:'https://ok.example/a#frag',title:'T'.repeat(400)},{url:'https://t.co/two'},{url:'https://three.example/'},{url:'https://four.example/'},{url:'https://five.example/'}];
+  const communityNote = {text:'N'.repeat(2000),links:[{url:'https://stats.example/'},{url:'ftp://stats.example/'},{url:'https://b.example/'},{url:'https://c.example/'}]};
+  const result = await analyze(bg, port, 'links-sanitized', 100, {post:{...post(100),links,communityNote}});
+  assert.equal(result.type, 'RESULT');
+  const sent = clone(bg.apiCalls[0].post);
+  assert.deepEqual(sent.links, [{url:'https://ok.example/a',title:'T'.repeat(300)},{url:'https://t.co/two'},{url:'https://three.example/'},{url:'https://four.example/'}]);
+  assert.equal(sent.communityNote.text.length, 1500); assert.deepEqual(sent.communityNote.links, [{url:'https://stats.example/'},{url:'https://b.example/'}]);
+  await analyze(bg, port, 'links-malformed', 101, {post:{...post(101),links:'oops',communityNote:{text:42}}});
+  assert.equal(Object.hasOwn(bg.apiCalls[1].post, 'links'), false); assert.equal(Object.hasOwn(bg.apiCalls[1].post, 'communityNote'), false);
+  // Comments draft from the visible post only.
+  await draftComments(bg, port, 'links-comments', 102, {post:{...post(102),links:[{url:'https://ok.example/'}]},analysis:{text:'Checked.'}});
+  assert.equal(Object.hasOwn(bg.commentCalls[0].post, 'links'), false);
+});
+
+test('a Claude answer is not reused once a Community Note appears, while Grok keys ignore it', async () => {
+  for (const provider of ['claude','api']) {
+    const {bg,port} = await goldenProviderBackground(provider);
+    assert.equal((await analyze(bg, port, provider+'-plain', 100, {triggerKind:'manual'})).cached === true, false);
+    const noted = await analyze(bg, port, provider+'-noted', 100, {triggerKind:'manual',post:{...post(100),communityNote:{text:'Readers added context.',links:[]}}});
+    assert.equal(noted.cached === true, provider !== 'claude', provider);
+    assert.equal((await analyze(bg, port, provider+'-noted-again', 100, {triggerKind:'manual',post:{...post(100),communityNote:{text:'Readers added context.',links:[]}}})).cached === true, true, provider);
+  }
+});
+
+// Answer cache retention (WP5). These tests opt in to the persisted periods;
+// the harness otherwise pins the browser-session cache.
+const DAY=24*60*60*1000;
+const storedAnswer=(text,completedAt=1800000000000)=>({completedAt,text,provider:'api',verificationStatus:'completed'});
+const partitionKey=(provider,...rest)=>JSON.stringify(['GrokFirst-v1',provider,...rest]);
+const cacheWritesTo=writes=>values=>{if(Object.hasOwn(values,'answerCache'))writes.push(clone(values.answerCache));};
+
+test('the default 1 day cache persists answers on disk and serves them after a browser restart without a new call',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'}});await bg.ready();
+  assert.equal(core.normalizeSettings({}).answerCacheRetention,'1d');
+  const first=await analyze(bg,bg.connect(),'persisted-seed');assert.equal(first.cached,false);
+  await until(()=>Object.keys(bg.local.data.answerCache||{}).length===1,'local answer write');
+  assert.equal(bg.session.data.cache,undefined,'Day periods never keep a second copy in session storage');
+  const restarted=createBackground({local:bg.local.data,session:null});await restarted.ready();
+  const reused=await analyze(restarted,restarted.connect(),'persisted-reuse');
+  assert.equal(reused.cached,true);assert.equal(reused.result.text,first.result.text);assert.equal(restarted.apiCalls.length,0);
+});
+
+test('retention is measured from generation: 7 days reuses a 2 day old answer, 1 day drops a 25 hour old one from disk',async()=>{
+  const seed=createBackground({settings:{answerCacheRetention:'7d'}});await seed.ready();
+  await analyze(seed,seed.connect(),'week-seed');await until(()=>seed.local.data.answerCache);
+  const week=createBackground({local:seed.local.data,session:null,now:1800000000000+2*DAY});await week.ready();
+  assert.equal((await analyze(week,week.connect(),'week-reuse')).cached,true);assert.equal(week.apiCalls.length,0);
+  const day=createBackground({local:{...seed.local.data,settings:{...seed.local.data.settings,answerCacheRetention:'1d'}},now:1800000000000+25*60*60*1000});
+  await day.ready();assert.deepEqual(day.local.data.answerCache,{},'Startup removes the expired answer from disk');
+  assert.equal((await analyze(day,day.connect(),'day-expired')).cached,false);assert.equal(day.apiCalls.length,1);
+});
+
+test('choosing until the browser closes moves answers off disk without cancelling work, and a day period moves them back',async()=>{
+  const held=deferred();
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},apiRun:async call=>{if(call.post.id==='101')await held.promise;return {text:'Answer '+call.post.id,provider:'api',verificationStatus:'completed'};}});
+  await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'moved-answer');await until(()=>bg.local.data.answerCache);
+  port.send({type:'ANALYZE',requestId:'running-during-change',post:post(101)});await until(()=>bg.apiCalls.length===2);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'session'}})).ok,true);
+  assert.equal(bg.apiCalls[1].signal.aborted,false,'A retention change never cancels a running check');
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.keys(bg.session.data.cache).length,1);
+  held.resolve();await until(()=>Object.keys(bg.session.data.cache||{}).length===2,'running answer joins the session cache');
+  assert.equal((await analyze(bg,port,'session-reuse')).cached,true);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'7d'}})).ok,true);
+  assert.equal(Object.keys(bg.local.data.answerCache).length,2);assert.equal(Object.hasOwn(bg.session.data,'cache'),false);
+});
+
+test('shortening 7 days to 1 day removes older answers at once in memory and on disk',async()=>{
+  const recent=storedAnswer('Recent answer',1800000000000-60*60*1000),old=storedAnswer('Old answer',1800000000000-3*DAY);
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:{[partitionKey('api','recent')]:recent,[partitionKey('api','old')]:old}}});
+  await bg.ready();assert.equal(Object.keys(bg.local.data.answerCache).length,2);
+  await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,answerCacheRetention:'1d'}});
+  assert.deepEqual(bg.local.data.answerCache,{[partitionKey('api','recent')]:recent});
+});
+
+test('turning browsing history off keeps answers only until the browser closes, whatever the saved period',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'7d'}});await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'history-on');await until(()=>bg.local.data.answerCache);
+  await bg.message({type:'SET_HISTORY_ENABLED',enabled:false},{id:'grokfirst-test',url:'chrome-extension://grokfirst-test/history.html'});
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.keys(bg.session.data.cache).length,1);
+  assert.equal(bg.local.data.settings.answerCacheRetention,'7d','The saved choice is kept for when history is turned back on');
+  assert.equal((await analyze(bg,port,'history-off-reuse')).cached,true);
+  const worker=createBackground({local:bg.local.data,session:bg.session.data});await worker.ready();
+  assert.equal(Object.hasOwn(worker.local.data,'answerCache'),false);assert.equal(Object.keys(worker.session.data.cache).length,1);
+  await worker.message({type:'SET_HISTORY_ENABLED',enabled:true});
+  assert.equal(Object.keys(worker.local.data.answerCache).length,1);assert.equal(Object.hasOwn(worker.session.data,'cache'),false);
+});
+
+test('the legacy local cache key is still deleted unread and never reaches the persisted cache',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{cache:{[partitionKey('api','legacy')]:storedAnswer('PRIVATE_OLD_POST')}}});
+  await bg.ready();const port=bg.connect();assert.equal(Object.hasOwn(bg.local.data,'cache'),false);
+  await analyze(bg,port,'after-legacy');await until(()=>bg.local.data.answerCache);
+  assert.equal(JSON.stringify(bg.local.data.answerCache).includes('PRIVATE_OLD_POST'),false);
+  assert.equal(JSON.stringify(port.messages).includes('PRIVATE_OLD_POST'),false);
+});
+
+test('the persisted cache keeps the newest 120 answers within 2 MB',async()=>{
+  const many=Object.fromEntries(Array.from({length:130},(_,index)=>[partitionKey('api','answer-'+index),storedAnswer('Answer '+index,1800000000000-index*1000)]));
+  const counted=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:many}});await counted.ready();
+  const kept=Object.keys(counted.local.data.answerCache);
+  assert.equal(kept.length,120);assert.ok(kept.includes(partitionKey('api','answer-0')));assert.ok(kept.includes(partitionKey('api','answer-119')));assert.equal(kept.includes(partitionKey('api','answer-120')),false);
+  const large=Object.fromEntries(Array.from({length:40},(_,index)=>[partitionKey('api','large-'+index),storedAnswer('L'.repeat(100_000),1800000000000-index*1000)]));
+  const sized=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:large}});await sized.ready();
+  const retained=Object.keys(sized.local.data.answerCache);
+  assert.ok(retained.length>=15&&retained.length<20,String(retained.length));assert.ok(retained.includes(partitionKey('api','large-0')));
+  assert.ok(new TextEncoder().encode(JSON.stringify(sized.local.data.answerCache)).byteLength<=2_000_000);
+});
+
+test('clearing the answer cache removes every stored copy and keeps the reuse count',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{answerCacheStats:{since:1799000000000,hits:4,tokens:900,usd:0.5}},cache:{[partitionKey('api','session')]:storedAnswer('Session copy')}});
+  await bg.ready();await analyze(bg,bg.connect(),'clear-seed');await until(()=>Object.keys(bg.local.data.answerCache||{}).length===2);
+  assert.equal(Object.hasOwn(bg.session.data,'cache'),false,'Startup moves a session copy into the active area');
+  assert.equal((await bg.message({type:'CLEAR_CACHE'})).ok,true);
+  assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false);assert.equal(Object.hasOwn(bg.session.data,'cache'),false);
+  assert.deepEqual(bg.local.data.answerCacheStats,{since:1799000000000,hits:4,tokens:900,usd:0.5});
+});
+
+test('an unremembered Grok login leaves no answers on disk for another account after a restart',async()=>{
+  const seed=createBackground({settings:{provider:'oauth',answerCacheRetention:'1d'},oauthState:oauthConnected(OAUTH_ACCOUNT_A),
+    apiRun:async()=>({provider:'oauth',text:'Account A evidence.',verificationStatus:'completed'})});
+  await seed.ready();await analyze(seed,seed.connect(),'account-a',930);await until(()=>seed.local.data.answerCache);
+  assert.ok(Object.keys(seed.local.data.answerCache)[0].includes(OAUTH_ACCOUNT_A));
+  const restarted=createBackground({local:seed.local.data,session:null});await restarted.ready();
+  await until(()=>Object.keys(restarted.local.data.answerCache).length===0,'signed-out purge');
+  restarted.oauthManager.change(oauthConnected(OAUTH_ACCOUNT_B));
+  const other=await analyze(restarted,restarted.connect(),'account-b',930);
+  assert.notEqual(other.cached,true);assert.equal(JSON.stringify(restarted.local.data.answerCache).includes('Account A evidence.'),false);
+});
+
+test('signing out, replacing a Claude Key and clearing a local connection also remove their answers from disk',async()=>{
+  const answerCache={[partitionKey('oauth',[OAUTH_ACCOUNT_A,'grok-4.3'])]:storedAnswer('OAuth'),[partitionKey('claude',['claude-messages-v2'])]:storedAnswer('Claude'),
+    [partitionKey('build',['official-ws-v1',2419,'grok-4.3'])]:storedAnswer('Build'),[partitionKey('api','grok-4.3')]:storedAnswer('API')};
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},oauthState:oauthConnected(OAUTH_ACCOUNT_A),local:{answerCache}});await bg.ready();
+  const providers=()=>Object.keys(bg.local.data.answerCache).map(key=>JSON.parse(key)[1]).sort();
+  assert.deepEqual(providers(),['api','build','claude','oauth']);
+  await bg.message({type:'OAUTH_LOGOUT'});await until(()=>!providers().includes('oauth'),'oauth purge');
+  await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-api03-background-fixture'});await until(()=>!providers().includes('claude'),'claude purge');
+  await bg.message({type:'CLEAR_BUILD_CONNECTION'});await until(()=>!providers().includes('build'),'build purge');
+  assert.deepEqual(providers(),['api']);
+});
+
+test('saving or clearing the API Key removes persisted answers from disk',async()=>{
+  for(const apiKey of ['replacement-api-key','']){
+    const bg=createBackground({settings:{answerCacheRetention:'7d'},local:{answerCache:{[partitionKey('api','grok-4.3')]:storedAnswer('API answer')}}});await bg.ready();
+    assert.equal((await bg.message({type:'SAVE_KEY',apiKey,remember:false})).ok,true);
+    assert.equal(Object.hasOwn(bg.local.data,'answerCache'),false,apiKey||'clear');
+  }
+});
+
+test('drafts and incomplete answers never reach the persisted cache',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},apiRun:async call=>call.post.kind==='draft'?{text:'PRIVATE_DRAFT_RESULT',provider:'api',verificationStatus:'completed'}:{text:'Partial evidence.',provider:'api',verificationStatus:'incomplete',verificationFailure:diagnosticFailure}});
+  await bg.ready();const port=bg.connect();
+  assert.equal((await checkPrivateDraft(bg,port,'draft:persisted',{id:'composer-persisted',text:'PRIVATE_DRAFT_TEXT'})).type,'RESULT');
+  assert.equal((await analyze(bg,port,'incomplete-persisted')).type,'RESULT');
+  await tick();assert.equal(bg.local.data.answerCache,undefined);assert.equal(bg.session.data.cache,undefined);
+});
+
+test('the reuse count records each served answer once per page with its tokens, and dollars only where tokens are billed',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},apiRun:async()=>({text:'Billed evidence.',provider:'api',verificationStatus:'completed',usage:{input_tokens:1000,output_tokens:200,total_tokens:1200,cost_in_usd_ticks:2e8}})});
+  await bg.ready();const port=bg.connect();const stats=async()=>{const {ok,...value}=await bg.message({type:'GET_CACHE_STATS'});return value;};
+  await analyze(bg,port,'stats-miss');assert.deepEqual(await stats(),{since:0,hits:0,tokens:0,usd:0,historyEnabled:true},'A miss is not counted');
+  assert.equal((await analyze(bg,port,'stats-hit')).cached,true);
+  assert.deepEqual(await stats(),{since:bg.now(),hits:1,tokens:1200,usd:0.02,historyEnabled:true});
+  await analyze(bg,port,'stats-rerender');
+  port.send({type:'LOOKUP_CACHED_POST',requestId:'stats-lookup',post:post(100)});await until(()=>port.messages.some(message=>message.requestId==='stats-lookup'));
+  assert.equal((await analyze(bg,port,'stats-force',100,{force:true})).cached,false);
+  assert.equal((await stats()).hits,1,'Re-renders, display lookups and rechecks are not reuse');
+  assert.equal((await analyze(bg,bg.connect(),'stats-new-page')).cached,true);assert.equal((await stats()).hits,2);
+  assert.deepEqual(bg.local.data.answerCacheStats,{since:1800000000000,hits:2,tokens:2400,usd:0.04});
+  const build=createBackground({settings:{provider:'build',answerCacheRetention:'1d'},buildRun:async()=>({text:'Local evidence.',provider:'build',searched:true,verificationStatus:'completed',usage:{total_tokens:300,cost_in_usd_ticks:2e8}})});
+  await build.ready();await build.configureBuild();const local=build.connect();await analyze(build,local,'build-miss');await analyze(build,local,'build-hit');
+  const {hits,tokens,usd}=await build.message({type:'GET_CACHE_STATS'});assert.deepEqual({hits,tokens,usd},{hits:1,tokens:300,usd:0});
+});
+
+test('the reuse count can be reset, survives restarts and never reaches X pages',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},local:{answerCacheStats:{since:1799000000000,hits:3,tokens:4000,usd:0.12}}});await bg.ready();
+  const restarted=createBackground({local:bg.local.data,session:null});await restarted.ready();
+  assert.equal((await restarted.message({type:'GET_CACHE_STATS'})).hits,3);
+  const port=restarted.connect();await until(()=>port.messages.some(message=>message.type==='CONFIG'));
+  assert.equal(JSON.stringify(port.messages).includes('4000'),false);assert.equal(Object.hasOwn(await restarted.message({type:'GET_CONFIG'}),'cacheStats'),false);
+  assert.equal((await restarted.message({type:'GET_CACHE_STATS'},{id:'grokfirst-test',url:'https://x.com/home'})).ok,false,'Only extension pages may read the count');
+  const reset=await restarted.message({type:'RESET_CACHE_STATS'});
+  assert.deepEqual({hits:reset.hits,tokens:reset.tokens,usd:reset.usd},{hits:0,tokens:0,usd:0});
+  await until(()=>restarted.local.data.answerCacheStats?.hits===0);
+});
+
+test('the hourly cleanup removes an expired persisted answer without a provider call',async()=>{
+  const bg=createBackground({settings:{answerCacheRetention:'1d'}});await bg.ready();
+  await analyze(bg,bg.connect(),'hourly-seed');await until(()=>Object.keys(bg.local.data.answerCache||{}).length===1);
+  bg.advance(DAY);bg.chrome.alarms.onAlarm.emit({name:'SUPERX_HISTORY_CLEANUP'});
+  await until(()=>Object.keys(bg.local.data.answerCache).length===0,'hourly cache prune');assert.equal(bg.apiCalls.length,1);
+});
+
+test('answers finishing during a disk write are saved together in at most one more write',async()=>{
+  const writes=[],gate=deferred();let blocked=true;
+  const bg=createBackground({settings:{answerCacheRetention:'1d'},localSet:async values=>{cacheWritesTo(writes)(values);if(Object.hasOwn(values,'answerCache')&&blocked){blocked=false;await gate.promise;}}});
+  await bg.ready();const port=bg.connect();
+  await analyze(bg,port,'burst-1',101);await until(()=>writes.length===1);
+  await analyze(bg,port,'burst-2',102);await analyze(bg,port,'burst-3',103);await analyze(bg,port,'burst-4',104);
+  gate.resolve();await until(()=>writes.length===2);await tick();await tick();
+  assert.equal(writes.length,2);assert.equal(Object.keys(writes[1]).length,4);assert.equal(Object.keys(bg.local.data.answerCache).length,4);
+});
+
+test('troubleshooting logs keep their 24 hour lifetime whatever the answer retention',async()=>{
+  const entry=age=>({recordedAt:1800000000000-age,code:'API_ERROR',requestDiagnostics:safeRequestDiagnostics});
+  const bg=createBackground({settings:{answerCacheRetention:'7d'},session:{apiRequestDiagnostics:[entry(60*60*1000),entry(25*60*60*1000)]}});await bg.ready();
+  const log=await readDiagnostics(bg);assert.equal(log.retentionHours,24);assert.deepEqual(log.entries.map(value=>value.recordedAt),[1800000000000-60*60*1000]);
+});
+
+test('layout health is kept per tab with allow-listed fields and offered to the popup for the active tab',async()=>{
+  const bg=createBackground();await bg.ready();
+  bg.tabs.set(8,{id:8,url:'https://x.com/Writer',active:false,windowId:1,status:'complete'});
+  const port=bg.connect(),other=bg.connect({sender:{id:bg.chrome.runtime.id,frameId:0,url:'https://x.com/Writer',tab:{id:8}}});
+  await until(()=>port.messages.some(m=>m.type==='CONFIG')&&other.messages.some(m=>m.type==='CONFIG'));
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null);
+  port.send({type:'LAYOUT_HEALTH',report:{code:'posts',route:'home',evidence:999,readable:0,withControls:0,language:'en',url:'https://x.com/Writer/status/1',text:'Claim'}});
+  other.send({type:'LAYOUT_HEALTH',report:{code:'actions',route:'profile',evidence:4,readable:4,withControls:0,language:'en'}});
+  const expected={code:'posts',route:'home',evidence:50,readable:0,withControls:0,language:'en'};
+  await until(()=>bg.session.data.layoutStates?.[8]);
+  assert.deepEqual((await bg.message({type:'GET_CONFIG'})).layoutHealth,expected);
+  assert.deepEqual(bg.session.data.layoutStates,{7:expected,8:{code:'actions',route:'profile',evidence:4,readable:4,withControls:0,language:'en'}});
+  port.send({type:'LAYOUT_HEALTH',report:{code:'composer',route:'home'}});
+  await until(()=>!bg.session.data.layoutStates[7]);assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null,'Unknown codes are dropped');
+  port.send({type:'LAYOUT_HEALTH',report:expected});await until(()=>bg.session.data.layoutStates[7]);
+  port.send({type:'LAYOUT_HEALTH',report:null});await until(()=>!bg.session.data.layoutStates[7]);
+  bg.chrome.tabs.onRemoved.emit(8);await until(()=>!bg.session.data.layoutStates[8]);
+  assert.equal(port.messages.some(m=>m.type==='LAYOUT_NOTICE_STATE'),false);assert.equal(bg.apiCalls.length,0);
+});
+
+test('a layout report survives a sleeping worker but not a new page in its tab',async()=>{
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const bg=createBackground({session:{layoutStates:{7:report}}});await bg.ready();
+  assert.deepEqual((await bg.message({type:'GET_CONFIG'})).layoutHealth,report,'A woken worker still knows about the tab');
+  const port=bg.connect();await until(()=>port.messages.some(m=>m.type==='CONFIG'));
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null,'A new port starts clean; a broken page reports again');
+  assert.deepEqual(bg.session.data.layoutStates,{});
+  const untrusted=bg.connect({sender:{id:'other-extension',frameId:0,url:'https://x.com/home',tab:{id:7}}});
+  untrusted.send({type:'LAYOUT_HEALTH',report});untrusted.send({type:'DISMISS_LAYOUT_NOTICE'});await tick();await tick();
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null);assert.equal(bg.local.data.layoutNoticeDismissed,undefined);
+});
+
+test('dismissing the layout notice is remembered for this extension version and broadcast to every tab',async()=>{
+  const bg=createBackground({local:{layoutNoticeDismissed:'1.1.5'}});await bg.ready();
+  const a=bg.connect(),b=bg.connect({sender:{id:bg.chrome.runtime.id,frameId:0,url:'https://x.com/home',tab:{id:8}}});
+  await until(()=>a.messages.some(m=>m.type==='CONFIG')&&b.messages.some(m=>m.type==='CONFIG'));
+  assert.equal(a.messages.find(m=>m.type==='CONFIG').layoutNoticeDismissed,'1.1.5');
+  const configs=b.messages.filter(m=>m.type==='CONFIG').length;
+  a.send({type:'DISMISS_LAYOUT_NOTICE'});
+  await until(()=>b.messages.some(m=>m.type==='LAYOUT_NOTICE_STATE'));
+  assert.deepEqual(b.messages.find(m=>m.type==='LAYOUT_NOTICE_STATE'),{type:'LAYOUT_NOTICE_STATE',dismissed:'1.1.6'});
+  assert.equal(b.messages.filter(m=>m.type==='CONFIG').length,configs,'A display preference does not reconfigure live triggers');
+  await until(()=>bg.local.data.layoutNoticeDismissed==='1.1.6');
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutNoticeDismissed,'1.1.6');
+  assert.equal(Object.hasOwn(bg.local.data.settings,'layoutNoticeDismissed'),false);
+});
+
+// Onboarding (WP6): fresh installs start click-only; an update only opens the
+// guide for a profile that never connected, and never changes its triggers.
+function freshProfile(local={},extra={}){return createBackground({session:null,...extra,local:{settings:undefined,...local}});}
+async function installEvent(bg,reason){
+  await bg.ready();bg.chrome.runtime.onInstalled.emit({reason});
+  for(let i=0;i<30;i++)await tick();
+}
+const onboardingURL='chrome-extension://grokfirst-test/onboarding.html';
+
+test('onboarding: a fresh install seeds click-only triggers on the subscription sign-in and opens the guide once',async()=>{
+  const bg=freshProfile();await installEvent(bg,'install');
+  const saved=bg.local.data.settings;
+  assert.equal(saved.provider,'oauth');assert.equal(saved.triggerMode,'custom');assert.equal(saved.enabled,true);
+  assert.deepEqual(saved.customTriggers,{...core.DEFAULT_CUSTOM_TRIGGERS,...core.CLICK_ONLY_TRIGGERS});
+  assert.equal(core.clickOnlyTriggers(saved),true);
+  assert.equal(bg.local.data.onboarding.version,1);assert.equal(bg.local.data.onboarding.state,'pending');assert.equal(typeof bg.local.data.onboarding.at,'number');
+  assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL]);
+  assert.equal(Object.hasOwn(saved,'onboarding'),false,'onboarding progress stays outside settings');
+  bg.chrome.runtime.onInstalled.emit({reason:'install'});for(let i=0;i<30;i++)await tick();
+  assert.equal(bg.createdTabs.length,1,'the onboarding record makes the handler idempotent');
+});
+
+test('onboarding: an update opens the guide only for a never-connected profile and keeps its triggers',async()=>{
+  const settings=core.normalizeSettings({provider:'oauth',triggerMode:'automatic'});
+  const bg=freshProfile({settings});await installEvent(bg,'update');
+  assert.deepEqual(bg.local.data.settings,settings);
+  assert.equal(bg.local.data.onboarding.state,'pending');assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL]);
+  for(const reason of ['chrome_update','shared_module_update']){
+    const other=freshProfile({settings});await installEvent(other,reason);
+    assert.equal(other.createdTabs.length,0,reason);assert.equal(other.local.data.onboarding,undefined,reason);assert.deepEqual(other.local.data.settings,settings,reason);
+  }
+});
+
+test('onboarding: any saved connection, saved settings on install, or an earlier record means no guide and no seed',async()=>{
+  const settings=core.normalizeSettings({provider:'oauth',triggerMode:'automatic'});
+  const connections={
+    'xAI Key':{local:{settings},extra:{session:{apiKey:'xai-session-key'}}},
+    'Claude Key':{local:{settings,claudeApiKeyEncrypted:{fixture:'claude'}},extra:{claudeStoreState:{key:'sk-ant-'+'a'.repeat(20)}}},
+    'local Grok Build':{local:{settings,buildConnectionEncrypted:{version:1}}},
+    'Grok sign-in':{local:{settings,superxOAuthCredential:{schema:1,kind:'auth'}}},
+    'earlier record':{local:{settings,onboarding:{version:1,state:'dismissed',at:1}}},
+  };
+  for(const [label,{local,extra}] of Object.entries(connections))for(const reason of ['install','update']){
+    const bg=freshProfile(local,extra);await installEvent(bg,reason);
+    assert.equal(bg.createdTabs.length,0,`${label} (${reason})`);
+    assert.equal(bg.local.data.settings.triggerMode,'automatic',`${label} (${reason})`);
+    if(label!=='earlier record')assert.equal(bg.local.data.onboarding,undefined,`${label} (${reason})`);
+  }
+  const existing=freshProfile({settings});await installEvent(existing,'install');
+  assert.equal(existing.createdTabs.length,0);assert.equal(existing.local.data.onboarding,undefined);assert.deepEqual(existing.local.data.settings,settings);
+});
+
+test('onboarding: rail and popup Settings lead to the guide only while it is pending and nothing is connected',async()=>{
+  const popup={id:'grokfirst-test',url:onboardingURL.replace('onboarding','popup')};
+  const opened=[];const bg=freshProfile({},{openOptionsPage:()=>opened.push('options')});await installEvent(bg,'install');
+  const port=bg.connect();await until(()=>port.messages.some(m=>m.type==='CONFIG'));
+  port.send({type:'OPEN_SETTINGS',focus:'oauth'});await until(()=>bg.createdTabs.length===2);
+  assert.equal((await bg.message({type:'OPEN_SETTINGS',focus:'oauth'},popup)).ok,true);
+  assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL,onboardingURL,onboardingURL]);assert.deepEqual(opened,[]);
+  assert.equal(bg.session.data.superxOptionsFocus.id,'oauth','a later Settings visit still focuses the connection');
+  assert.equal((await bg.message({type:'OPEN_SETTINGS'})).ok,true);assert.deepEqual(opened,['options'],'the Settings page itself is never redirected');
+  for(const state of ['done','dismissed']){
+    await bg.local.set({onboarding:{version:1,state,at:2}});
+    assert.equal((await bg.message({type:'OPEN_SETTINGS'},popup)).ok,true);
+  }
+  assert.equal(opened.length,3);assert.equal(bg.createdTabs.length,3);
+  const ready=createBackground({local:{onboarding:{version:1,state:'pending',at:1}},openOptionsPage:()=>opened.push('ready')});await ready.ready();
+  assert.equal((await ready.message({type:'OPEN_SETTINGS'},popup)).ok,true);assert.equal(opened.at(-1),'ready');assert.equal(ready.createdTabs.length,0);
+});
+
+test('onboarding: connecting anywhere finishes a pending guide, so a later lost connection leads to Settings',async()=>{
+  const popup={id:'grokfirst-test',url:onboardingURL.replace('onboarding','popup')};
+  const opened=[];const bg=freshProfile({},{openOptionsPage:()=>opened.push('options')});await installEvent(bg,'install');
+  assert.equal(bg.local.data.onboarding.state,'pending');
+  assert.equal((await bg.message({type:'SAVE_KEY',apiKey:'xai-settings-key',settings:{...bg.local.data.settings,provider:'api'},triggerPreferencesChanged:false})).ok,true);
+  await until(()=>bg.local.data.onboarding.state==='done');
+  assert.equal(bg.local.data.onboarding.version,1);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,provider:'build'},triggerPreferencesChanged:false})).ok,true);
+  assert.equal((await bg.message({type:'GET_CONFIG'})).ready,false);
+  assert.equal((await bg.message({type:'OPEN_SETTINGS'},popup)).ok,true);
+  assert.deepEqual(opened,['options']);assert.equal(bg.createdTabs.length,1,'only the first-run guide tab');
+});
+
+test('onboarding: a Key saved from the guide keeps a saved "do not remember" choice',async()=>{
+  const guide={id:'grokfirst-test',url:onboardingURL};
+  const settings=core.normalizeSettings({provider:'api'});
+  const bg=createBackground({local:{settings,rememberApiKey:false}});await bg.ready();
+  assert.equal((await bg.message({type:'SAVE_KEY',apiKey:'xai-session-only',settings,triggerPreferencesChanged:false},guide)).ok,true);
+  assert.equal(bg.local.data.rememberApiKey,false);assert.equal(bg.local.data.apiKeyEncrypted,undefined);
+  assert.equal(bg.session.data.apiKey,'xai-session-only');
+});
+
+test('onboarding: the guide page is trusted UI and connecting keeps the click-only seed',async()=>{
+  const guide={id:'grokfirst-test',url:onboardingURL};
+  const bg=freshProfile();await installEvent(bg,'install');
+  assert.equal((await bg.message({type:'GET_CONFIG'},guide)).ok,true);
+  assert.equal((await bg.message({type:'OAUTH_LOGIN',remember:true},guide)).ok,true);
+  const saved=await bg.message({type:'SAVE_KEY',apiKey:'xai-onboarding-key',remember:true,settings:{...bg.local.data.settings,provider:'api',triggerMode:'automatic'},triggerPreferencesChanged:false},guide);
+  assert.equal(saved.ok,true);assert.equal(bg.local.data.settings.provider,'api');assert.equal(core.clickOnlyTriggers(bg.local.data.settings),true);
+  const claude=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-'+'b'.repeat(20),settings:{...bg.local.data.settings,provider:'claude'},triggerPreferencesChanged:false},guide);
+  assert.equal(claude.ok,true);assert.equal(bg.local.data.settings.provider,'claude');assert.equal(core.clickOnlyTriggers(bg.local.data.settings),true);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,triggerMode:'automatic'},triggerPreferencesChanged:true},guide)).ok,true);
+  assert.equal(bg.local.data.settings.triggerMode,'automatic');
+  for(const url of ['chrome-extension://grokfirst-test/onboarding.html.evil','chrome-extension://another/onboarding.html','https://x.com/onboarding.html'])
+    assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:bg.local.data.settings},{id:'grokfirst-test',url})).ok,false,url);
 });

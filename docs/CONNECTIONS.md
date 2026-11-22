@@ -1,12 +1,13 @@
 # Connect SuperX
 
-The current release offers three independent connections: [Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo), [release notes](https://github.com/bwjoke/SuperX/releases/latest) and [installable ZIP](https://github.com/bwjoke/SuperX/releases/latest/download/SuperX.zip). **Sign in · The X Subscription** is first and the default for new installations; **Grok API Key** uses a Key you create; **Grok Build · Local CLI / ACP** connects to the official service on your computer. All three initially select **Grok 4.3 / reasoning None** and retain their own choices. Existing selections and settings are preserved. Nonempty older settings without a source keep API; missing/empty settings with legacy credentials also keep that conservative API path. Switching sources never substitutes another credential, changes account budgets or bypasses quotas. Archived 0.7.26 supports API Key mode only.
+The current release offers three independent connections: [Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo), [release notes](https://github.com/bwjoke/SuperX/releases/latest) and [installable ZIP](https://github.com/bwjoke/SuperX/releases/latest/download/SuperX.zip). **Sign in · The X Subscription** is first and the default for new installations; **Grok API Key** uses a Key you create; **Grok Build · Local CLI / ACP** connects to the official service on your computer. All three initially select **Grok 4.3 / reasoning None** and retain their own choices. Existing selections and settings are preserved. Nonempty older settings without a source keep API; missing/empty settings with legacy credentials also keep that conservative API path. Switching sources never substitutes another credential, changes account budgets or bypasses quotas. Archived 0.7.26 supports API Key mode only. This fork adds a fourth connection, [Claude API Key](#claude-api-key), which uses your own Anthropic API credit.
 
 | Connection | What you need | Where you sign in / manage usage |
 | --- | --- | --- |
 | Sign in · The X Subscription | An eligible Grok account and a browser | Official xAI device-authorization page; your Grok account |
 | Grok API Key | A Grok Inference Key or xAI Console API Key | Grok Dashboard for subscription allowance, or xAI Console for pay-as-you-go usage |
 | Grok Build · Local CLI / ACP | Official Grok installed, signed in and running locally | Official CLI login and account; SuperX connects only to its loopback service |
+| Claude API Key | A Claude API Key (`sk-ant-…`) from the Claude Console organization that holds your credit | Claude Console → Billing |
 
 ## Grok subscription (OAuth) — browser only
 
@@ -71,6 +72,39 @@ In all three connection modes, automatic analysis waits until feed/page scrollin
 Started answers, comments and their existing retries continue when posts scroll out of view, when X temporarily unmounts their articles and when switching browser tabs. Returning restores the same task and partial output without starting another request. While the feed is hidden, new automatic triggers pause and only work confirmed never to have started is withdrawn. Actual page navigation, tab closure and BFCache suspension still stop interrupted work safely, retain available partial output and require manual retry. Unstarted work can also be withdrawn when it leaves view. API Key and CLI / ACP tasks retry transient failures after 3 seconds, up to 5 additional attempts, without pausing other posts. Waiting retries release their request slots and rejoin the shared queue only after local transport cleanup finishes. Reported usage accumulates across attempts; retries may consume additional provider allowance or paid API usage. Invalid credentials, account restrictions, output limits, unsupported settings and unconfirmed local cancellation do not automatically retry. OAuth uses the more conservative no-replay policy above. No retry changes the selected connection, model or reasoning level.
 
 Generated cache entries and saved-history answers/comments are scoped to the selected connection source and, for OAuth, the individual authorization identity. Switching sources or OAuth accounts does not show another source/account's generated results. The local record of which posts you visited remains available; switching or signing out does not delete those visits.
+
+## Claude API Key
+
+This browser-only option uses your own Claude API credit, such as the monthly API credit included with Claude Max. Requests go from the extension background worker directly to `api.anthropic.com`.
+
+1. In [Claude Console](https://platform.claude.com/), open the organization that holds your credit and create a Key under **API Keys**. It starts with `sk-ant-`. A separate Key for SuperX makes its usage easy to find.
+2. Open SuperX **Settings → Connection**, select **Claude API Key**, paste the Key and save. It is encrypted with AES-GCM and kept on this device only. The setup guide that opens on a fresh install can do this step too, and it can be reopened from Settings or the popup.
+3. Adjust the model, effort, searches, spending limit and cycle day if you need to, then open X.
+
+The credit must be API credit you can see in Claude Console under **Billing → Promotional credits**. Chat usage from Claude Pro or Max cannot be used by third-party extensions. Monthly Max credit expires at the end of its cycle. When it runs out, Anthropic stops requests unless you added a payment method or auto-reload.
+
+The defaults are meant for a reader who wants occasional, trustworthy checks without surprise spend. Heavy users change them in Settings; there is no separate profile.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| Claude model | Haiku 5.5, fixed | **Auto** is an opt-in choice and never the default. |
+| Reasoning effort | Medium | Low or High are available. |
+| Web searches per check | 3 | Each search costs about $0.01 on top of tokens. |
+| Spending limit per cycle | $100 | 0 means no limit. |
+| Cycle resets on day | 15 | Set it to the day your monthly credit expires. |
+| Triggers | Fresh installs: only when you click | Existing users keep their triggers. |
+| Automatic Claude checks | Off | Turn on **Also allow automatic checks** to allow them. |
+| Answer cache | 1 day, kept on this device | Falls back to "Until the browser closes" when browsing history is off. |
+| Verdict row and source labels | Always on | No setting. |
+| Free local pre-screen | On for automatic triggers, every connection | Manual clicks are never pre-screened. |
+
+**What Claude sees.** Claude can search the web but cannot search X or open x.com posts. SuperX passes along what is on your screen: the post text, quoted posts, image descriptions, link cards and any Community Note. Claude may also open up to two of the post's own links with server-side web fetch; `x.com`, `twitter.com` and `t.co` are blocked. SuperX does not click **Show more** or capture threads, so a collapsed post is marked **Full text not read** in the verdict row.
+
+**Pre-screen and Auto.** A free local pre-screen skips automatic checks of posts too short to hold a claim, on every connection; the row says **No checkable claim** and offers **Check anyway**. With Claude, **Pre-screen automatic checks** (on by default, used only when automatic Claude checks are on) asks Haiku 5.5 first whether a post makes a factual claim, for under $0.001. Choosing **Auto** as the model uses the same pre-screen to send contested, high-stakes or unclear posts to Sonnet 5.5 and the rest to Haiku 5.5; if the pre-screen fails, Haiku is used. Pre-screen cost is added to the cycle's spend.
+
+**Spend.** SuperX estimates each request's cost from the tokens and searches Anthropic reports, adds it to the cycle total and stops sending Claude requests when the total reaches your limit. Claude Console is the authoritative record. Rough guide per check: Haiku 5.5 about $0.02–0.03, mostly searches; Sonnet 5.5 about $0.07; Opus 5.5 about $0.12. Reused answers from the cache cost nothing; Settings › Maintenance shows how many were reused and about how much they saved.
+
+Manual draft checks work with Claude as they do with Grok. Your Grok trigger choices stay unchanged and apply again when you switch back. See [Privacy](../PRIVACY.md#what-is-sent-to-anthropic-claude-connection) for what is sent to Anthropic, and [PROVIDERS.md](PROVIDERS.md) for how connections are described in code.
 
 ## Troubleshooting
 
@@ -145,5 +179,7 @@ OAuth 已收到 HTTP 200 后的流错误、未完成或超时不自动重放；�
 启动命令只监听本机地址，自动生成连接码并隔离工作／配置目录。连接码只用于本机官方服务，不是账号密码或 API Key；请勿公开连接码、完整命令或相关截图。SuperX 本机加密保存连接码，不读取或复制官方登录文件。重启电脑后需要重新运行启动命令；按 Ctrl+C 停止服务。浏览器断线不等于官方任务已经停止，若提示停止未确认，请在终端按 Ctrl+C 手动停止。停止后若提示仍在，请从设置重新加载 SuperX，再启动服务并重新检查连接；停止未确认时不会自动重试，也不会转为 API 计费。
 
 CLI／ACP 支持 Windows 和 macOS 引导；此版本按官方 Grok 1.0.60 检查兼容性。工具限制不等同于系统沙箱，本机 CLI 的 Mac 及真实账号实机验收仍需另行完成。完整数据说明见 [隐私说明](../PRIVACY.md)。
+
+**Claude API Key 模式**使用你自己的 Claude API 额度（例如 Claude Max 每月附带的额度），默认 Haiku 5.5、只在点击时核查、带周期花费上限；完整说明见 [Claude 使用说明](CLAUDE.zh-CN.md)。
 
 Sources: [official Grok Build installation](https://github.com/xai-org/grok-build), [official agent / WebSocket mode](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/15-agent-mode.md), [headless CLI and ACP](https://docs.x.ai/build/cli/headless-scripting).

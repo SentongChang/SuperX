@@ -16,7 +16,7 @@ try{playwright=require('playwright');}catch{playwright=await import(pathToFileUR
 const report={environment:'Isolated synthetic X preview; every network request intercepted',checks:[],errors:[],externalRequests:[]};
 const check=(name,value)=>{report.checks.push({name,passed:Boolean(value)});assert.ok(value,name);};
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS8AAAAASUVORK5CYII=','base64');
-const scripts=['x-dom.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js','content.js'];
+const scripts=['x-dom.js','provider-registry.js','source-quality.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js','content.js'];
 let browser;
 try{browser=await playwright.chromium.launch({channel:'msedge',headless:true});}catch{browser=await playwright.chromium.launch({headless:true});}
 await mkdir(output,{recursive:true});

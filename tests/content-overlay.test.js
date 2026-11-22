@@ -99,7 +99,7 @@ test('the rail history icon opens local history independently of analysis readin
 
 // The fake DOM records writes to the actual X nodes while giving the extension
 // its own shadow roots. Geometry arithmetic is covered by overlay-layout.test.
-function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='miss',modern=false}={}) {
+function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='miss',modern=false,layoutProbe}={}) {
   const writes = [], nodes = [], timeouts = new Map(), frames = new Map(), intervals = [];
   const intersectionObservers = [], mutationObservers = [], resizeObservers = [];
   const copied=[];let copyFailure=false;
@@ -270,7 +270,7 @@ function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='mis
   const context = vm.createContext({
     document, window, location, URL, URLSearchParams, AbortController, crypto, Date: ClockDate,
     innerWidth: 1440, innerHeight: 960,
-    XGrokCore: { ...core, extractPost: article => {postExtractions++;return article.postData ? ({ ...article.postData }) : null;} }, GrokFirstOverlayLayout: layout,
+    XGrokCore: { ...core, extractPost: article => {postExtractions++;return article.postData ? ({ ...article.postData }) : null;}, ...(layoutProbe?{DOM:{...core.DOM,layoutProbe}}:{}) }, GrokFirstOverlayLayout: layout,
     chrome: { runtime: { id: 'test-extension', connect: () => {connectAttempts++;if(connectFailure)throw connectFailure;return port;}, getURL: asset => `chrome-extension://test-extension/${asset}`,
       onMessage:{addListener(){nativeHooks.messageListeners++;}},
       async sendMessage(message){runtimeMessages.push(message);if(runtimeFailure)throw runtimeFailure;return {ok:true};}
@@ -330,6 +330,7 @@ function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='mis
     },
     intersect() { for (const observer of intersectionObservers) observer.callback(articles.filter(article => article.isConnected).map(target => ({ target, isIntersecting: true }))); harness.flush(); },
     tick(ms = 0) { now += ms; for (const interval of intervals) if (interval.delay === 100) interval.fn(); harness.flush(); },
+    probeLayout(count = 1) { for (let index = 0; index < count; index++) { now += core.LAYOUT_HEALTH.probeMs; for (const interval of intervals) if (interval.delay === core.LAYOUT_HEALTH.probeMs) interval.fn(); harness.flush(); } },
     elapse(ms) { now+=ms;for(const [id,timer] of [...timeouts])if(timer.at<=now){timeouts.delete(id);timer.fn();}harness.flush(); },
     scroll(delta) { for (const article of articles) { article.rect.top -= delta; article.rect.bottom -= delta; } window.emit('scroll'); document.emit('scroll'); harness.flush(); },
     resize(width) { context.innerWidth = width; window.visualViewport.width = width; window.emit('resize'); for (const observer of resizeObservers) observer.callback([]); harness.flush(); },
@@ -4577,4 +4578,383 @@ test('partial and cached checks retain useful text while naming the account limi
     assert.equal(status.title,ui.t(key,'zh-CN'));assert.equal(card.testShadow.querySelector('.answer').textContent,result.text);assertAccountUsageLinks(card,'api');
     assertTokenCount(card,9);page.tick(60000);assert.equal(page.port.sent.filter(message=>message.type==='ANALYZE').length,1);
   }
+});
+
+// Golden characterization for the provider registry (WP7-P0). These rail
+// keys, titles, links and focus values were recorded before the registry
+// existed and must stay unchanged through it.
+function goldenProviderPage(provider,{ready=true,...settings}={}){
+  const page=fixture({postCount:1});
+  if(provider==='oauth')oauthFeedConfig(page,{ready,settings});
+  else{page.port.onMessage.emit({type:'CONFIG',settings:{...core.DEFAULT_SETTINGS,provider,dwellMs:0,claudeAutoTrigger:true,...settings},ready,used:0});page.flush();}
+  return page;
+}
+function goldenStatusText(key){
+  if(key==='status.needsKey')return ui.t('status.needsKeyAction','zh-CN',{settings:ui.t('common.settings','zh-CN')});
+  const text=ui.t(key,'zh-CN',{model:core.DEFAULT_SETTINGS.oauthModel});
+  return key.startsWith('oauth.')?text+' '+ui.t('common.settings','zh-CN'):key.startsWith('build.')?text+' '+ui.t('popup.setupBuild','zh-CN'):text;
+}
+
+test('golden: rail error keys for every provider and code family',()=>{
+  const http=(httpStatus,providerCode,code='ACCESS')=>({stage:'verify',code,errorCode:'API_ERROR',httpStatus,providerCode});
+  const rows=[
+    // Claude-owned keys take precedence, and the budget code wins under any provider.
+    ['claude','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['api','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['oauth','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['claude','API_ERROR',http(401),'claude.keyRejected'],
+    ['claude','API_ERROR',http(undefined,'authentication_error'),'claude.keyRejected'],
+    ['claude','API_ERROR',http(503,undefined,'SERVER'),'claude.serverError'],
+    ['claude','API_ERROR',http(undefined,undefined,'SERVER'),'claude.serverError'],
+    ...[400,402,403,404].map(status=>['claude','API_ERROR',http(status),'claude.requestRejected']),
+    ['claude','API_ERROR',http(undefined,'billing_error'),'claude.requestRejected'],
+    ['claude','API_ERROR',http(429,undefined,'RATE_LIMIT'),'account.limited'],
+    ['claude','API_ERROR',http(undefined,undefined,'CONNECTION'),'error.apiConnection'],
+    ['claude','NEEDS_KEY',undefined,'status.needsKey'],
+    // Shared input and model codes.
+    ['api','MODEL_UNSUPPORTED',undefined,'error.modelUnsupported'],
+    ['oauth','MEDIA_INPUT_LIMIT',undefined,'error.mediaLimit'],
+    ['api','API_IMAGE_INPUT',undefined,'error.apiImageInput'],
+    ['build','BUILD_IMAGE_UNSUPPORTED',undefined,'build.imageUnsupported'],
+    ['build','BUILD_IMAGE_UNAVAILABLE',undefined,'build.imageUnavailable'],
+    ['build','BUILD_IMAGE_LIMIT',undefined,'build.imageLimit'],
+    // Sign-in codes, with a fallback for any other OAUTH_ code.
+    ...Object.entries({OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',
+      OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_CANCELLED:'oauth.canceled',OAUTH_MODEL_UNAVAILABLE:'oauth.modelUnavailable',
+      OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError',OAUTH_SOMETHING_NEW:'oauth.unavailable'})
+      .map(([code,key])=>['oauth',code,undefined,key]),
+    ['api','OAUTH_LOGIN_REQUIRED',undefined,'oauth.needsLogin'],
+    ['api','API_CAPACITY',{stage:'verify',code:'SERVER',errorCode:'API_CAPACITY'},'error.apiCapacity'],
+    // Local Grok Build codes, with a fallback for any other BUILD_ code.
+    ...Object.entries({BUILD_LOGIN_REQUIRED:'build.login',BUILD_CANCEL_UNCONFIRMED:'build.cancelUnconfirmed',BUILD_CONNECTION_REQUIRED:'build.codeRequired',BUILD_AUTH_FAILED:'build.codeInvalid',
+      BUILD_UNAVAILABLE:'build.missing',BUILD_DISCONNECTED:'build.missing',BUILD_NATIVE_MISSING:'build.missing',BUILD_VERSION_UNSUPPORTED:'build.unsupported',
+      BUILD_MODEL_UNSUPPORTED:'build.unsupported',BUILD_EFFORT_UNSUPPORTED:'build.unsupported',BUILD_SOMETHING_NEW:'build.unavailable'})
+      .map(([code,key])=>['build',code,undefined,key]),
+    // Account limits apply before the per-provider API ladder.
+    ...['api','oauth','build','claude'].map(provider=>[provider,'API_ERROR',http(402,'spending_limit'),'account.spending']),
+    ['api','RATE_LIMIT',undefined,'account.limited'],
+    // The API ladder: sign-in keeps its own wording for 401/402/403.
+    ['api','API_ERROR',http(401),'error.apiKeyRejected'],
+    ['build','API_ERROR',http(401),'error.apiKeyRejected'],
+    ['oauth','API_ERROR',http(401),'oauth.reauthRequired'],
+    ['api','API_ERROR',http(402),'error.apiUsage'],
+    ['oauth','API_ERROR',http(402),'oauth.usageError'],
+    ['api','API_ERROR',http(403),'error.apiAccess'],
+    ['oauth','API_ERROR',http(undefined,'forbidden'),'oauth.permissionError'],
+    ['oauth','API_ERROR',http(undefined,undefined,'CONNECTION'),'error.apiConnection'],
+    ['api','API_ERROR',http(502,undefined,'SERVER'),'error.apiServer'],
+    ['oauth','API_ERROR',http(409),'error.apiRequest'],
+    ['api','API_ERROR',http(undefined,undefined,'ACCESS'),'error.apiRequest'],
+    ['api','API_ERROR',http(undefined,undefined,'UNKNOWN'),'error.apiFailed'],
+    // Provider-independent tail codes.
+    ['oauth','API_STREAM_ERROR',undefined,'error.apiConnection'],
+    ['api','TIMEOUT',undefined,'error.apiTimeout'],
+    ['api','API_INCOMPLETE',{stage:'verify',code:'OUTPUT_LIMIT'},'error.apiOutputLimit'],
+    ['api','API_INCOMPLETE',undefined,'error.apiIncomplete'],
+    ['api','KEY_MIGRATION_REQUIRED',undefined,'status.needsKey'],
+    ['build','CANCELLED',undefined,'status.cancelled'],
+    ['api','RAIL_COLLAPSED',undefined,'status.disabled'],
+    ['api','URL_SEARCH_REQUIRED',undefined,'error.urlSearchRequired'],
+    ['oauth','API_LANGUAGE_MISMATCH',undefined,'error.outputLanguageMismatch'],
+    ['claude','SOMETHING_NEW',undefined,'status.failed']
+  ];
+  for(const [provider,code,verificationFailure,key] of rows){
+    const page=goldenProviderPage(provider),request=page.port.sent.find(message=>message.type==='ANALYZE');
+    assert.ok(request,provider+' analysis starts');
+    page.port.onMessage.emit({type:'ERROR',requestId:request.requestId,code,error:'Safe generic error',verificationFailure});page.flush();
+    assert.equal(page.cards()[0].testShadow.querySelector('.status').textContent,goldenStatusText(key),`${provider} ${code} ${JSON.stringify(verificationFailure)} → ${key}`);
+  }
+});
+
+test('golden: rail titles, usage links and Settings focus per provider',async()=>{
+  const expected={
+    api:{header:['tooltip.apiMode',{count:5}],setup:'common.enterKey',focus:'api-key',links:[['account.viewUsage','https://grok.com/dashboard/usage'],['account.viewConsole','https://console.x.ai/']]},
+    oauth:{header:['oauth.modeLabel',{count:5}],setup:'oauth.login',focus:'oauth',links:[['account.viewUsage','https://grok.com/dashboard/usage']]},
+    build:{header:['popup.buildLabel',{transport:'ACP'}],setup:'popup.setupBuild',focus:'build',links:[['account.viewUsage','https://grok.com/dashboard/usage']]},
+    claude:{header:['claude.modeLabel',{count:5}],setup:'common.enterKey',focus:'claude',links:[['claude.billingLink','https://platform.claude.com/settings/billing']]}
+  };
+  const railNode=(page,name)=>page.nodes.find(node=>node.className===name);
+  for(const [provider,{header,setup,focus,links}] of Object.entries(expected)){
+    const blocked=goldenProviderPage(provider,{ready:false,apiConcurrency:5});
+    assert.equal(railNode(blocked,'rail-head').title,ui.t(header[0],'zh-CN',header[1]),provider);
+    assert.equal(railNode(blocked,'rail-settings').title,ui.t(setup,'zh-CN'),provider);
+    railNode(blocked,'rail-settings').emit('click');await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(blocked.runtimeMessages.findLast(message=>message.type==='OPEN_SETTINGS').focus,focus,provider);
+
+    const page=goldenProviderPage(provider,{apiConcurrency:5});
+    assert.equal(railNode(page,'rail-settings').title,ui.t('common.settings','zh-CN'),provider);
+    const request=page.port.sent.find(message=>message.type==='ANALYZE');
+    page.port.onMessage.emit({type:'ERROR',requestId:request.requestId,code:'API_ERROR',verificationFailure:{stage:'verify',code:'ACCESS',errorCode:'API_ERROR',httpStatus:402,providerCode:'spending_limit'}});page.flush();
+    const help=page.cards()[0].testShadow.querySelector('.usage-help');assert.equal(help.hidden,false,provider);
+    assert.deepEqual(help.querySelectorAll('a').map(link=>[link.textContent,link.href]),links.map(([key,url])=>[ui.t(key,'zh-CN'),url]),provider);
+  }
+});
+
+function verdictFixture() {
+  const page=fixture({postCount:1});page.configure({interfaceLanguage:'en'});
+  return {page,request:page.port.sent.find(message=>message.type==='ANALYZE'),card:page.cards()[0]};
+}
+
+test('the verdict row shows a streamed verdict at once, gaps only at the end, and clears on retry',()=>{
+  const {page,request,card}=verdictFixture();
+  const row=card.testShadow.querySelector('.verdict'),send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  assert.equal(row.hidden,true);
+  send({type:'START'});send({type:'UPDATE',phase:'verify',text:'',verdict:null});assert.equal(row.hidden,true);
+  send({type:'UPDATE',phase:'verify',text:'The date is right; the place is not.',verdict:'mixed'});
+  assert.equal(row.hidden,false);assert.equal(row.getAttribute('data-verdict'),'mixed');assert.equal(row.textContent,'Mixed');
+  assert.equal(row.getAttribute('aria-label'),'Fact check result: Mixed');
+  const children=card.testShadow.querySelector('.card').children;
+  assert.equal(children.indexOf(row),children.indexOf(card.testShadow.querySelector('.status'))+1,'The row sits between the status line and the answer');
+  send({type:'UPDATE',phase:'verify',text:'',verdict:null});assert.equal(row.hidden,true,'A text reset clears the badge');
+  send({type:'UPDATE',phase:'verify',text:'The date is right; the place is not.',verdict:'mixed'});
+  send({type:'RESULT',result:{provider:'api',text:'The date is right; the place is not.',verdict:'mixed',gaps:['media','search'],searched:false,verificationStatus:'unverified',sources:[]}});
+  assert.equal(row.textContent,'MixedPartial check · Images not read · No search');assert.equal(row.hasAttribute('data-tentative'),true);
+  assert.equal(row.getAttribute('aria-label'),'Fact check result: Mixed. Partial check: Images not read, No search');
+  assert.equal(row.querySelectorAll('span').find(node=>node.textContent==='Images not read').title,'At least one image was not available to the model.');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(row.textContent,'部分准确核查不完整 · 未读取图片 · 未搜索','Labels follow the interface language');
+  card.testShadow.querySelector('.retry').emit('click');page.flush();
+  assert.equal(row.hidden,true);assert.equal(row.textContent,'');
+});
+
+test('the verdict row needs no verdict to show gaps, and hides for answers without either',()=>{
+  const {page,request,card}=verdictFixture();const row=card.testShadow.querySelector('.verdict');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'Older cached answer.',sources:[]}});page.flush();
+  assert.equal(row.hidden,true);
+  const second=verdictFixture();
+  second.page.port.onMessage.emit({type:'RESULT',requestId:second.request.requestId,result:{provider:'api',text:'No marker.',gaps:['text','unknown'],verdict:'probably',sources:[]}});second.page.flush();
+  const gapsOnly=second.card.testShadow.querySelector('.verdict');
+  assert.equal(gapsOnly.hidden,false);assert.equal(gapsOnly.textContent,'Partial check · Full text not read');assert.equal(gapsOnly.hasAttribute('data-verdict'),false);
+});
+
+test('a partial answer keeps its verdict and gaps while the retry waits',()=>{
+  const {page,request,card}=verdictFixture();const row=card.testShadow.querySelector('.verdict');
+  page.port.onMessage.emit({type:'START',requestId:request.requestId});
+  retryWait(page,request,{code:'API_INCOMPLETE',partialResult:{provider:'api',apiVerification:'only',text:'The value is lower.',verdict:'inaccurate',gaps:['search'],verificationStatus:'incomplete',verificationFailure:{stage:'verify',code:'INCOMPLETE'}}});
+  assert.equal(row.textContent,'InaccuratePartial check · No search');
+  assert.match(card.testShadow.querySelector('.status').textContent,/Fact check incomplete/);
+});
+
+test('a skipped post shows one calm row with the no-claim dot and Check anyway, and never resubmits itself',()=>{
+  const {page,request,card}=verdictFixture(),shadow=card.testShadow,send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  const box=shadow.querySelector('.card'),row=shadow.querySelector('.skip'),analyses=()=>page.port.sent.filter(message=>message.type==='ANALYZE');
+  assert.equal(box.hasAttribute('data-skipped'),false);
+  send({type:'START'});send({type:'UPDATE',phase:'triage'});
+  assert.equal(shadow.querySelector('.status').textContent,'Checking for claims…');
+  send({type:'TRIAGE_SKIP',triage:{kind:'opinion',local:false},usage:{input_tokens:400,output_tokens:20,total_tokens:420},usageByStage:{triage:{total_tokens:420}}});
+  assert.equal(box.hasAttribute('data-skipped'),true);
+  assert.equal(row.querySelector('.skip-label').textContent,'No checkable claim · Opinion','The row reuses the verdict wording');
+  assert.equal(row.title,'Pre-screened by Claude Haiku 5.5. Nothing was searched, and only the pre-screen was charged.');
+  const button=row.querySelector('.check-anyway');assert.equal(button.textContent,'Check anyway');assert.equal(button.disabled,false);
+  assert.equal(shadow.querySelector('.answer').textContent,'');assert.equal(shadow.querySelector('.retry').hidden,true);
+  const style=shadow.querySelector('style').textContent;
+  assert.match(style,/\.card\[data-skipped\]>:not\(\.skip\)\{display:none!important\}/,'Nothing but the row shows');
+  assert.match(style,/\.skip \.verdict-dot\{[^}]*background:transparent\}/,'The dot is hollow, like the verdict for no claim');
+  page.flush();page.flush();
+  assert.equal(analyses().length,1,'A skipped post is not resubmitted by automatic triggers');
+  button.emit('click');page.flush();
+  assert.equal(analyses().length,2);assert.equal(analyses()[1].triggerKind,'recheck','Check anyway is an explicit check');assert.equal(analyses()[1].force,false);
+  assert.equal(box.hasAttribute('data-skipped'),false);
+});
+
+test('a skipped row names unknown kinds Other, explains a local skip and follows the interface language',()=>{
+  const {page,request,card}=verdictFixture(),row=card.testShadow.querySelector('.skip');
+  page.port.onMessage.emit({type:'TRIAGE_SKIP',requestId:request.requestId,triage:{kind:'<img src=x>',local:true}});page.flush();
+  assert.equal(row.querySelector('.skip-label').textContent,'No checkable claim · Other');
+  assert.equal(row.title,'Too short to contain a checkable claim. Nothing was sent for checking.');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(row.querySelector('.skip-label').textContent,'无可核查说法 · 其他');assert.equal(row.querySelector('.check-anyway').textContent,'仍要核查');
+});
+
+test('an Auto route is explained only in the usage tooltip, from known reasons',()=>{
+  for(const [reason,line] of [['hard','Auto chose Sonnet: hard or contested post'],['fallback','Auto chose Haiku: pre-screen unavailable'],['bogus',null]]){
+    const {page,request,card}=verdictFixture();
+    page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'claude',text:'Checked.',sources:[],model:'claude-sonnet-5-5',
+      usage:{input_tokens:900,output_tokens:100,total_tokens:1000},usageByStage:{triage:{total_tokens:420},verify:{total_tokens:1000}},claudeRoute:{model:'claude-sonnet-5-5',reason}}});page.flush();
+    const usage=card.testShadow.querySelector('.token-usage');
+    if(line)assert.ok(usage.title.split('\n').includes(line),reason);else assert.doesNotMatch(usage.title,/Auto chose/,reason);
+    assert.doesNotMatch(card.testShadow.querySelector('.answer').textContent,/Auto chose/);
+  }
+});
+
+test('finished answers label their sources by publisher type without decorating inline links',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources'),answer=card.testShadow.querySelector('.answer');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'The figure matches [the wire report](https://www.reuters.com/world/a "Wire copy").',
+    sources:[{url:'https://www.reuters.com/world/a',title:'1'},{url:'https://x.com/someone/status/2',title:'A reply'},{url:'https://x.com/test/status/100',title:'The checked post'}]}});page.flush();
+  const mix=sources.querySelector('.source-mix');
+  assert.equal(mix.textContent,'Sources: News 1 · Social 1','The checked post is listed but not counted');
+  assert.equal(mix.title,"Labels come from the web address only; they don't rate the page itself.");
+  assert.equal(sources.querySelector('.source-weak'),null);
+  const rows=sources.querySelectorAll('.source-row');
+  assert.deepEqual(rows.map(row=>row.querySelector('.tier').textContent),['Social','Social']);
+  assert.deepEqual(rows.map(row=>row.querySelector('a').href),['https://x.com/someone/status/2','https://x.com/test/status/100']);
+  assert.equal(rows[0].querySelector('.tier').className,'tier tier-social');
+  const inline=answer.querySelector('a');
+  assert.equal(inline.dataset.sourceTier,'news');assert.equal(inline.title,'Wire copy\nNews · reuters.com');
+  assert.equal(inline.className||'','','Inline links get no visible badge');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(sources.querySelector('.source-mix').textContent,'来源：新闻 1 · 社交媒体 1');
+  assert.equal(sources.querySelector('.tier').textContent,'社交媒体');
+  assert.equal(inline.title,'Wire copy\n新闻 · reuters.com','Relabelling keeps the authored title once');
+});
+
+test('only social, reference or other sources add one calm missing-source line',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'Only posts discuss it.',sources:[{url:'https://x.com/a/status/3',title:'Post'},{url:'https://en.wikipedia.org/wiki/X',title:'Wiki'}]}});page.flush();
+  const mix=sources.querySelector('.source-mix');
+  assert.equal(mix.textContent,'Sources: Reference 1 · Social 1No official, academic or news source cited');
+  assert.equal(mix.querySelector('.source-weak').textContent,'No official, academic or news source cited');
+  const style=card.testShadow.querySelector('style').textContent;
+  assert.match(style,/\.source-weak\{display:block;margin-top:2px;color:var\(--gf-fg,#e7e9ea\)\}/);
+  assert.match(style,/\.tier\{[^}]*border:1px solid color-mix\(in srgb,var\(--gf-muted,#71767b\) 45%,transparent\)/);
+  assert.doesNotMatch(style,/\.tier\{[^}]*background/,'Chips are outlined, never filled');
+});
+
+test('the source mix waits for the end of a run and clears on retry',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources'),send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  send({type:'START'});send({type:'UPDATE',phase:'verify',text:'Still checking.',verdict:null,sources:[{url:'https://apnews.com/a',title:'AP'}]});
+  assert.equal(sources.querySelector('.source-mix'),null,'No counts while streaming');
+  assert.equal(sources.querySelector('.tier').textContent,'News','Chips can appear while streaming');
+  send({type:'RESULT',result:{provider:'api',text:'Checked.',sources:[{url:'https://apnews.com/a',title:'AP'}]}});
+  assert.equal(sources.querySelector('.source-mix').textContent,'Sources: News 1');
+  card.testShadow.querySelector('.retry').emit('click');page.flush();
+  assert.equal(sources.querySelector('.source-mix'),null);assert.equal(sources.childNodes.length,0);
+});
+
+test('a kept partial answer shows its source mix, and an answer without sources shows none',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources');
+  page.port.onMessage.emit({type:'START',requestId:request.requestId});
+  retryWait(page,request,{code:'API_INCOMPLETE',partialResult:{provider:'api',text:'The value is lower.',verificationStatus:'incomplete',sources:[{url:'https://www.cdc.gov/a',title:'CDC'}]}});
+  assert.equal(sources.querySelector('.source-mix').textContent,'Sources: Official 1');
+  const other=verdictFixture();
+  other.page.port.onMessage.emit({type:'RESULT',requestId:other.request.requestId,result:{provider:'api',text:'From memory only.',sources:[]}});other.page.flush();
+  assert.equal(other.card.testShadow.querySelector('.sources').childNodes.length,0);
+});
+
+test('a reused answer an hour old or more keeps its age in view beside the cached label',()=>{
+  const day=24*60*60*1000,cases=[[3*day,new Intl.RelativeTimeFormat('zh-CN',{numeric:'auto',style:'short'}).format(-3,'day')],[5*60*60*1000,new Intl.RelativeTimeFormat('zh-CN',{numeric:'auto',style:'short'}).format(-5,'hour')],[10*60*1000,'']];
+  for(const [age,label] of cases){
+    const {page,request,card}=tokenFixture();
+    page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,cached:true,result:{provider:'api',text:'Earlier evidence.',sources:[],searched:true,verificationStatus:'completed',usage:{total_tokens:9},completedAt:1800000000000-age}});page.flush();
+    const status=card.testShadow.querySelector('.status');
+    assert.equal(status.textContent,ui.t('status.cached','zh-CN')+' · '+(label?label+' · ':'')+ui.t('status.searched','zh-CN'),String(age));
+    assert.equal(status.hidden,!label,'A recent reuse leaves its provenance to the usage details');
+  }
+});
+
+const unreadableLayout={route:'home',signedOut:false,evidence:6,readable:0,withControls:0};
+const readableLayout={route:'home',signedOut:false,evidence:6,readable:6,withControls:6};
+function layoutPage(initial=unreadableLayout){
+  const state={probe:initial},page=fixture({postCount:1,layoutProbe:()=>({...state.probe})});
+  page.layout=value=>{state.probe=value;};
+  page.notice=()=>page.nodes.find(node=>node.className==='layout-notice');
+  page.layoutMessages=()=>JSON.parse(JSON.stringify(page.port.sent.filter(message=>message.type==='LAYOUT_HEALTH')));
+  return page;
+}
+
+test('healthy, empty and unprobed pages never report layout health',()=>{
+  for(const probe of [readableLayout,{...readableLayout,evidence:0,readable:0,withControls:0},{...unreadableLayout,signedOut:true},{...unreadableLayout,route:'other'}]){
+    const page=layoutPage(probe);page.configure();page.probeLayout(12);
+    assert.deepEqual(page.layoutMessages(),[],JSON.stringify(probe));assert.equal(page.notice().hidden,true);
+  }
+  const page=fixture({postCount:2});page.configure();page.intersect();page.tick();page.probeLayout(12);
+  assert.equal(page.port.sent.some(message=>message.type==='LAYOUT_HEALTH'),false,'The real probe finds no evidence on a page without permalinks');
+});
+
+test('an unreadable layout shows one rail notice after settling and reports each transition once',()=>{
+  const page=layoutPage();page.configure();
+  page.probeLayout(4);assert.equal(page.notice().hidden,true,'Four probes 7.5 s apart are still inside the settle time');
+  page.probeLayout(1);
+  const notice=page.notice();assert.equal(notice.hidden,false);
+  assert.equal(notice.querySelector('.layout-title').textContent,ui.t('layout.title','zh-CN'));
+  assert.equal(notice.querySelector('.layout-body').textContent,ui.t('layout.posts','zh-CN'));
+  assert.equal(notice.style.top,(53+12)+'px');assert.equal(notice.style.left,(870+12)+'px');assert.equal(notice.style.width,(380-24)+'px');
+  const link=new URL(notice.querySelector('.layout-report').href);
+  assert.equal(link.origin+link.pathname,'https://github.com/bwjoke/SuperX/issues/new');assert.match(link.searchParams.get('body'),/Failure: posts\nPost links found: 6\nPosts recognised: 0/);
+  assert.deepEqual(page.layoutMessages(),[{type:'LAYOUT_HEALTH',report:{code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'zh-CN'}}]);
+  page.probeLayout(5);assert.equal(page.layoutMessages().length,1,'A continuing failure is not repeated');
+  page.layout(readableLayout);page.probeLayout(1);assert.equal(page.notice().hidden,false);
+  page.probeLayout(1);assert.equal(page.notice().hidden,true);
+  assert.deepEqual(page.layoutMessages().at(-1),{type:'LAYOUT_HEALTH',report:null});assert.equal(page.layoutMessages().length,2);
+});
+
+test('a route change hides the layout notice at once and reports recovery',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);assert.equal(page.notice().hidden,false);
+  page.location.pathname='/explore';page.tick();assert.equal(page.notice().hidden,true);
+  page.layout({...unreadableLayout,route:'other'});page.probeLayout(1);
+  assert.deepEqual(page.layoutMessages().map(message=>message.report?.code||null),['posts',null]);
+});
+
+test('moving from a broken page to an unsupported one reports recovery',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.location.pathname='/messages';page.tick();page.probeLayout(1);
+  assert.deepEqual(page.layoutMessages().map(message=>message.report?.code||null),['posts',null]);
+  page.probeLayout(3);assert.equal(page.layoutMessages().length,2,'An unsupported page is never probed');
+});
+
+test('a missing post button is reported only when the button is in use',()=>{
+  const buttons={...readableLayout,withControls:0};
+  const automatic=layoutPage(buttons);automatic.configure();automatic.probeLayout(6);assert.deepEqual(automatic.layoutMessages(),[]);
+  const page=layoutPage(buttons);page.configure({triggerMode:'custom',customTriggers:{...core.DEFAULT_CUSTOM_TRIGGERS,manual:true}});page.probeLayout(5);
+  assert.equal(page.notice().querySelector('.layout-body').textContent,ui.t('layout.actions','zh-CN'));
+  assert.equal(page.layoutMessages()[0].report.code,'actions');
+});
+
+test('the layout notice is the first rail card: answers start below it, not under it',()=>{
+  const page=layoutPage();page.configure();page.intersect();page.tick();
+  const card=page.cards()[0];assert.ok(card);assert.equal(card.hidden,false);
+  const before=card.getBoundingClientRect().top;
+  page.probeLayout(5);const notice=page.notice();assert.equal(notice.hidden,false);
+  const noticeBottom=Number.parseFloat(notice.style.top)+notice.offsetHeight;
+  const box=card.testShadow.querySelector('.card');assert.ok(box);
+  const visibleTop=card.getBoundingClientRect().top+Number.parseFloat(box.style.top||'0');
+  assert.equal(card.hidden,false);assert.ok(visibleTop>=noticeBottom,`answer content (${visibleTop}) starts below the notice (${noticeBottom})`);
+  notice.querySelector('.layout-dismiss').emit('click');page.flush();
+  assert.equal(card.hidden,false);assert.equal(card.getBoundingClientRect().top,before,'dismissing gives the space back');
+});
+
+test('dismissing the layout notice hides it for this extension version in every tab',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.notice().querySelector('.layout-dismiss').emit('click');page.flush();
+  assert.equal(page.notice().hidden,true);assert.equal(page.port.sent.filter(message=>message.type==='DISMISS_LAYOUT_NOTICE').length,1);
+  page.probeLayout(3);assert.equal(page.notice().hidden,true);
+  page.port.onMessage.emit({type:'LAYOUT_NOTICE_STATE',dismissed:'0.9.0'});page.flush();assert.equal(page.notice().hidden,false,'A dismissal from another version does not apply');
+  const other=layoutPage();other.port.onMessage.emit({type:'CONFIG',settings:{...core.DEFAULT_SETTINGS,provider:'api'},ready:true,layoutNoticeDismissed:'development'});other.flush();
+  other.probeLayout(5);assert.equal(other.notice().hidden,true);assert.equal(other.layoutMessages().length,1,'The popup still learns about a dismissed failure');
+});
+
+test('the layout notice stays out of a collapsed rail, X dialogs and a paused page',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.nodes.find(node=>node.className==='rail-collapse').emit('click');page.flush();assert.equal(page.notice().hidden,true);
+  page.nodes.find(node=>node.className==='rail-expand').emit('click');page.flush();assert.equal(page.notice().hidden,false);
+  const {portal}=xModal(page);page.mutate([{type:'childList',target:page.document.body}]);
+  assert.equal(page.nodes.find(node=>node.id==='grokfirst-overlay').hidden,true);
+  page.layout(readableLayout);page.probeLayout(3);assert.equal(page.layoutMessages().length,1,'No probe runs under an X dialog');
+  portal.remove();page.mutate([{type:'childList',target:page.document.body}]);
+
+  const paused=layoutPage();paused.configure({triggerMode:'paused'});paused.probeLayout(6);
+  assert.deepEqual(paused.layoutMessages(),[]);assert.equal(paused.notice().hidden,true);
+});
+
+test('the layout notice floats only when X’s column cannot be found',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.primary.removeAttribute('data-testid');page.mutate();
+  const notice=page.notice();assert.equal(notice.hidden,false);
+  assert.deepEqual([notice.style.top,notice.style.left,notice.style.width],['64px',(1440-16-300)+'px','300px']);
+  const narrow=layoutPage();narrow.resize(700);narrow.configure();narrow.probeLayout(5);
+  assert.equal(narrow.notice().hidden,true,'A narrow window leaves the popup line as the only signal');assert.equal(narrow.layoutMessages().length,1);
+});
+
+test('a reconnecting page re-reports a broken layout, and a sleeping worker is woken for a transition',()=>{
+  // Click-only triggers keep the page idle, so the worker may go to sleep.
+  const clickOnly={triggerMode:'custom',customTriggers:{manual:true,buttonHover:false,postHover:false,detailMain:false,detailReplies:false}};
+  const page=layoutPage();page.configure(clickOnly);page.probeLayout(5);
+  const first=page.replacePort();first.onDisconnect.emit();page.flush();
+  assert.equal(page.connectionAttempts(),1,'An idle disconnect does not reconnect by itself');
+  page.layout(readableLayout);page.probeLayout(2);
+  assert.equal(page.connectionAttempts(),2,'Recovery wakes the worker so the popup line clears');
+  assert.deepEqual(page.port.sent.filter(message=>message.type==='LAYOUT_HEALTH'),[],'The new port starts clean and a healthy page sends nothing');
+  page.configure(clickOnly);page.layout(unreadableLayout);page.probeLayout(5);
+  const broken=page.replacePort();broken.onDisconnect.emit();page.flush();page.nodes.find(node=>node.className==='rail-settings').emit('click');page.flush();
+  assert.equal(page.port.sent.find(message=>message.type==='LAYOUT_HEALTH')?.report?.code,'posts');
 });

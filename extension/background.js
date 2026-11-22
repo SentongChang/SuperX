@@ -1,9 +1,10 @@
 /* SuperX: credentials and provider calls stay in the extension worker. */
-importScripts('feed-core.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
-const Core = XGrokCore;
+importScripts('provider-registry.js', 'feed-core.js', 'claude-transport.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
+const Core = XGrokCore, Providers = Core.providers;
 const UI = GrokFirstUI;
 const KeyStore = SuperXKeyStore;
 const BuildKeyStore = SuperXBuildConnectionStore;
+const ClaudeKeyStore = SuperXClaudeKeyStore;
 const history = SuperXHistoryStore.create(chrome.storage.local);
 const HISTORY_ALARM = 'SUPERX_HISTORY_CLEANUP';
 const clients = new Set();
@@ -12,6 +13,9 @@ const runningJobs = new Set();
 const apiSlots = new Set();
 let queue = [], pumping = false, settings, cache = {}, quotas = {}, railStates = {}, revision = 0, cacheEpoch = 0;
 let triggerGuideCompleted = false, triggerGuidePersisted = false, triggerGuideWrite;
+// Layout self-check: each X tab's last broken-layout report (browser session
+// only), and the extension version whose page notice the user dismissed.
+let layoutStates = {}, layoutStateWrites = Promise.resolve(), layoutNoticeDismissed = '';
 let uiLanguage = UI.browserLanguage(globalThis);
 let apiDiagnostics = [], apiDiagnosticsEpoch = 0, apiDiagnosticsReady = Promise.resolve(), apiDiagnosticsWrites = Promise.resolve();
 let quotaWrites = Promise.resolve(), cacheWrites = Promise.resolve(), railStateWrites = Promise.resolve(), uiLanguageWrites = Promise.resolve();
@@ -19,10 +23,25 @@ let securityWrites = Promise.resolve(), securityPending = 0, securityGeneration 
 let hasSavedKey = false, rememberApiKey = true, credentialReady = false, securityFault = false, sealAttempted = false;
 let buildStatus = {connected:false,installed:false,available:false,errorCode:'BUILD_NOT_CONNECTED'}, buildStatusAt = 0, buildStatusPending;
 let buildSecret='',buildConnectionGeneration=0,buildConnectionPending=0;
+// Claude API Key (encrypted at rest like the xAI Key) and the local estimate of
+// what this extension has spent in the current billing cycle.
+let claudeKey='',claudeSpend={cycleStart:0,usd:0,requests:0},claudeSpendWrites=Promise.resolve();
 let oauthGeneration=0,oauthActionGeneration=0,oauthPendingLogins=0,oauthCredentialIdentity='',oauthReady=Promise.resolve(),providerFault=false;
 const oauth=SuperXOAuth.create({chrome,fetch:globalThis.fetch?.bind(globalThis),crypto:globalThis.crypto,
   keyStore:KeyStore.create?.({purpose:'oauth-refresh'}),onChange:onOAuthChanged});
-const CACHE_TTL = 24 * 60 * 60 * 1000;
+// Diagnostics keep a fixed lifetime, independent of answer retention.
+const DIAGNOSTICS_TTL = 24 * 60 * 60 * 1000;
+// Answers kept for a day period persist under their own key. The retired
+// local 'cache' key is still deleted unread, so old caches are never imported.
+const LOCAL_CACHE_KEY = 'answerCache', CACHE_STATS_KEY = 'answerCacheStats';
+let historyEnabled = true, pendingCacheWrite, cacheStats = normalizeCacheStats(), cacheStatsWrites = Promise.resolve();
+// Claude pre-screen results for this browser session. A screen does not
+// depend on the answer language or model, and it has its own fixed lifetime.
+let triageCache = {};
+const TRIAGE_TTL = 24 * 60 * 60 * 1000, TRIAGE_CACHE_LIMIT = 500, TRIAGE_TIMEOUT_MS = 10000;
+// What this profile held when the worker started, before initialize() saves
+// normalized settings. Only onInstalled reads it, to decide on onboarding.
+let startupProfile = {settings:false,credential:false};
 const ready = initialize();
 
 async function initialize() {
@@ -30,19 +49,21 @@ async function initialize() {
   await chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
   // Onboarding state is optional UI data; a read failure must not prevent Key
   // restoration or generation. It is independent of saved analysis settings.
-  const guideReady=chrome.storage.local.get('triggerGuideCompleted').then(value=>{
+  const guideReady=chrome.storage.local.get(['triggerGuideCompleted','layoutNoticeDismissed']).then(value=>{
     triggerGuideCompleted=value.triggerGuideCompleted===true;
     triggerGuidePersisted=triggerGuideCompleted;
+    if(typeof value.layoutNoticeDismissed==='string')layoutNoticeDismissed=value.layoutNoticeDismissed;
   }).catch(()=>{});
   // Diagnostic storage is optional. Its reads/writes never gate credentials,
   // analysis or normal extension startup.
   apiDiagnosticsReady=loadAPIDiagnostics();
-  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource']);
-  const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','securityFault','apiBudgetPause','apiCapacityPause']);
+  const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend',LOCAL_CACHE_KEY,CACHE_STATS_KEY,SuperXHistoryStore.ENABLED_KEY]);
+  const session = await chrome.storage.session.get(['quotas','railStates','layoutStates','uiLanguage','apiKey','cache','claudeTriageCache','securityFault','apiBudgetPause','apiCapacityPause']);
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
-  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!['api','build','oauth','native'].includes(local.settings.provider));
+  startupProfile={settings:Boolean(hasSettings),credential:legacyConnection||ClaudeKeyStore.envelopePresent(local.claudeApiKeyEncrypted)};
+  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!Providers.has(local.settings.provider)&&!Providers.isRetired(local.settings.provider));
   if(providerFault)await chrome.storage.local.set({invalidAnswerSource:true});
   // OAuth restoration cannot delay an independent API Key or local connection.
   // Its own gate stays closed until restoration has established usable state.
@@ -53,6 +74,12 @@ async function initialize() {
   if(BuildKeyStore.envelopePresent(local.buildConnectionEncrypted)){
     try{const secret=await BuildKeyStore.open(local.buildConnectionEncrypted);if(validBuildSecret(secret))buildSecret=secret;}catch{/* Reconnect locally; API Key remains independent. */}
   }
+  if(ClaudeKeyStore.envelopePresent(local.claudeApiKeyEncrypted)){
+    try{const key=await ClaudeKeyStore.open(local.claudeApiKeyEncrypted);if(SuperXClaude.validKey(key))claudeKey=key.trim();}catch{/* Enter the Claude Key again; other connections stay independent. */}
+  }
+  claudeSpend=normalizeClaudeSpend(local.claudeSpend);
+  cacheStats=normalizeCacheStats(local[CACHE_STATS_KEY]);
+  historyEnabled=local[SuperXHistoryStore.ENABLED_KEY]!==false;
   securityFault = session.securityFault === true;
   const storedCredential=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined;
   rememberApiKey = typeof local.rememberApiKey === 'boolean' ? local.rememberApiKey : Boolean(storedCredential) || !validKey(session.apiKey);
@@ -81,13 +108,10 @@ async function initialize() {
   const stored=await chrome.storage.local.get(['apiKey','apiKeyEncrypted','apiKeyVault']);
   hasSavedKey=KeyStore.envelopePresent(stored.apiKeyEncrypted)||validKey(stored.apiKey)||stored.apiKeyVault!==undefined;
   credentialReady=validKey(session.apiKey);
-  cache = pruneCache(session.cache); quotas = session.quotas || {};railStates = session.railStates || {};
+  triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};layoutStates = session.layoutStates || {};
+  await restoreCache(local[LOCAL_CACHE_KEY],session.cache);
   // Delete the old persistent post cache without reading or migrating its data.
   await chrome.storage.local.remove('cache');
-  // Browser-session data expires after 24 hours, without a provider call.
-  if(session.cache!==undefined&&(!session.cache||typeof session.cache!=='object'||Array.isArray(session.cache)||Object.keys(session.cache).length!==Object.keys(cache).length)) {
-    try{await persistCache(cacheEpoch);}catch{/* Clean memory stays usable if session cleanup fails; later cache writes retry. */}
-  }
   // Only X reports are persisted; browser locale remains a fresh-install fallback.
   uiLanguage = UI.normalizeLanguage(session.uiLanguage || local.uiLanguage || uiLanguage);
   // Persist the supported selection while keeping credentials in their existing storage.
@@ -98,13 +122,59 @@ async function initialize() {
   // or paid work, and no credential is passed to this store.
   void history.prune().then(()=>broadcastHistoryConfig()).catch(()=>{});
   try{await chrome.alarms?.create(HISTORY_ALARM,{periodInMinutes:60});}catch{/* Reads and writes still remove expired records. */}
+  // Saved answers can outlive a Grok login that was not remembered. Once the
+  // login is restored, answers for any other account leave disk as well.
+  void oauthReady.then(()=>{
+    const identity=oauth.status().credentialId||'',current=cached=>cached?.[0]===identity;
+    if(Object.keys(cache).some(key=>{const partition=cachePartition(key);return partition[1]==='oauth'&&!current(partition[2]);}))return dropProviderCache('oauth',current);
+  }).catch(()=>{});
   await guideReady;
 }
 function validKey(value) { return typeof value==='string' && Boolean(value.trim()) && value.length<=500 && !/[\r\n]/.test(value); }
 function securityAllowsCalls() { return !securityFault && credentialReady && securityPending===0; }
 function buildReady() { return buildConnectionPending===0&&validBuildSecret(buildSecret)&&buildStatus.connected===true&&buildStatus.installed===true&&buildStatus.available===true&&buildStatus.authenticated===true&&buildStatus.permission!==false; }
+function normalizeClaudeSpend(value){
+  const number=field=>Number.isFinite(value?.[field])&&value[field]>=0?value[field]:0;
+  return {cycleStart:number('cycleStart'),usd:number('usd'),requests:Math.trunc(number('requests'))};
+}
+function claudeSpendSummary(now=Date.now()){
+  const cycle=Core.claudeCycle(now,settings?.claudeCycleDay);
+  const spend=claudeSpend.cycleStart===cycle.start?claudeSpend:{cycleStart:cycle.start,usd:0,requests:0};
+  const budgetUsd=settings?.claudeBudgetUsd??Core.DEFAULT_SETTINGS.claudeBudgetUsd;
+  return {configured:SuperXClaude.validKey(claudeKey),usd:Math.round(spend.usd*1e6)/1e6,requests:spend.requests,budgetUsd,
+    cycleStart:cycle.start,cycleEnd:cycle.end,exhausted:budgetUsd>0&&spend.usd>=budgetUsd};
+}
+function normalizeCacheStats(value){
+  const number=field=>Number.isFinite(value?.[field])&&value[field]>=0?value[field]:0;
+  return {since:Math.trunc(number('since')),hits:Math.trunc(number('hits')),tokens:Math.trunc(number('tokens')),usd:number('usd')};
+}
+function persistCacheStats(){
+  const snapshot=cacheStats;
+  cacheStatsWrites=cacheStatsWrites.catch(()=>{}).then(()=>chrome.storage.local.set({[CACHE_STATS_KEY]:snapshot}));
+  return cacheStatsWrites;
+}
+// What a reused answer would have cost again: its reported tokens, and its
+// dollars only where the user pays per token. Counts only, no post identity.
+function recordCacheReuse(entry,provider){
+  const usage=entry.usage||{};
+  const tokens=Number.isFinite(usage.total_tokens)?usage.total_tokens:(Number(usage.input_tokens)||0)+(Number(usage.output_tokens)||0);
+  const usd=Providers.get(provider)?.billing==='metered'?SuperXClaude.ticksToUSD(usage.cost_in_usd_ticks):0;
+  cacheStats={since:cacheStats.since||Date.now(),hits:cacheStats.hits+1,tokens:cacheStats.tokens+Math.max(0,Math.trunc(tokens)),usd:cacheStats.usd+usd};
+  void persistCacheStats().catch(()=>{});
+}
+function recordClaudeSpend(usage){
+  const usd=SuperXClaude.ticksToUSD(usage?.cost_in_usd_ticks);
+  if(!usd)return;
+  const cycle=Core.claudeCycle(Date.now(),settings.claudeCycleDay);
+  if(claudeSpend.cycleStart!==cycle.start)claudeSpend={cycleStart:cycle.start,usd:0,requests:0};
+  claudeSpend={cycleStart:cycle.start,usd:claudeSpend.usd+usd,requests:claudeSpend.requests+1};
+  const snapshot=claudeSpend;
+  claudeSpendWrites=claudeSpendWrites.catch(()=>{}).then(()=>chrome.storage.local.set({claudeSpend:snapshot}));
+  void claudeSpendWrites.catch(()=>{});
+}
 function providerAllowsCalls(s=settings) {
   if(providerFault)return false;
+  if(s?.provider==='claude')return SuperXClaude.validKey(claudeKey);
   if(s?.provider==='api')return securityAllowsCalls();
   if(s?.provider==='build')return buildReady();
   if(s?.provider==='oauth'){
@@ -124,8 +194,7 @@ function onOAuthChanged(){
   if(identity!==oauthCredentialIdentity){
     oauthCredentialIdentity=identity;oauthGeneration++;
     for(const job of [...jobs.values()].filter(value=>value.settings.provider==='oauth'))abortJob(job);
-    for(const key of Object.keys(cache)){try{const partition=JSON.parse(key);if(partition[1]==='oauth'&&(!identity||partition[2]?.[0]!==identity))delete cache[key];}catch{delete cache[key];}}
-    cacheEpoch++;
+    void dropProviderCache('oauth',cached=>Boolean(identity)&&cached?.[0]===identity).catch(()=>{});
     if(settings?.provider==='oauth')void history.invalidateResults?.().catch(()=>{});
   }
   // Device codes and the official authorization URL go only to extension UI.
@@ -135,8 +204,6 @@ function onOAuthChanged(){
     await broadcastConfig();pump();
   }).catch(()=>{});
 }
-function selectedModel(value){return Core.providerModel?Core.providerModel(value):value.provider==='oauth'?value.oauthModel:value.provider==='build'?value.buildModel:value.apiModel;}
-function selectedEffort(value){return Core.providerEffort?Core.providerEffort(value):value.provider==='oauth'?value.oauthReasoningEffort:value.provider==='build'?value.buildReasoningEffort:Core.reasoningEffort(value.apiModel,value.apiReasoningEffort);}
 function historyScope(value=settings){return value.provider==='oauth'?'oauth:'+(value.oauthCredentialId||oauth.status().credentialId||'signed-out'):value.provider;}
 function scopedHistory(result){
   const scope=historyScope();
@@ -196,7 +263,7 @@ function queueBuildConnection(message,clear=false){
         buildSecret=connection.secret;
         await saveSettings(next?mergeTriggerPreferences(next,message.triggerPreferencesChanged===false):{...settings,buildPort:connection.port});
       }
-      cache=Object.fromEntries(Object.entries(cache).filter(([key])=>{try{return JSON.parse(key)[1]!=='build';}catch{return true;}}));cacheEpoch++;await persistCache(cacheEpoch);
+      await dropProviderCache('build');
     }catch{failure=buildStorageError();buildSecret='';}
     finally{buildConnectionPending--;}
     if(generation===buildConnectionGeneration){buildStatusAt=0;buildStatus={connected:false,installed:false,available:false,errorCode:'BUILD_CONNECTION_REQUIRED'};}
@@ -231,7 +298,7 @@ function securityStatus() {
 }
 function isX(url) { try { return ['x.com','twitter.com'].includes(new URL(url).hostname) && new URL(url).protocol === 'https:'; } catch { return false; } }
 function isFeed(url) { return isX(url) && !/^\/(?:messages|i\/(?:chat|grok|flow|premium|settings))\b/.test(new URL(url).pathname); }
-function trustedUI(sender) { try { const url=new URL(sender.url),base=new URL(chrome.runtime.getURL(''));return sender.id===chrome.runtime.id&&url.protocol===base.protocol&&url.host===base.host&&['/options.html','/popup.html','/history.html','/setup.html'].includes(url.pathname); }catch{return false;} }
+function trustedUI(sender) { try { const url=new URL(sender.url),base=new URL(chrome.runtime.getURL(''));return sender.id===chrome.runtime.id&&url.protocol===base.protocol&&url.host===base.host&&['/options.html','/popup.html','/history.html','/setup.html','/onboarding.html'].includes(url.pathname); }catch{return false;} }
 function trustedFeed(sender) { return sender.id===chrome.runtime.id && sender.frameId===0 && Number.isInteger(sender.tab?.id) && isFeed(sender.url); }
 function explicitPostTrigger(kind) { return kind==='manual'||kind==='recheck'; }
 function postJob(job) { return !commentsJob(job)&&!draftJob(job); }
@@ -255,7 +322,7 @@ async function readTriggerPage(client, supplied) {
   return pageUrl;
 }
 function paidTaskSettings(value={}) {
-  const {explainPrompt,verifyPrompt,draftPrompt,postDraftPrompt,replyDraftPrompt,commentsPrompt,interfaceLanguage,dwellMs,analysisDefaultsVersion,oauthRemember,enabled,triggerMode,customTriggers,...other}=value;
+  const {explainPrompt,verifyPrompt,draftPrompt,postDraftPrompt,replyDraftPrompt,commentsPrompt,interfaceLanguage,dwellMs,analysisDefaultsVersion,oauthRemember,enabled,triggerMode,customTriggers,answerCacheRetention,...other}=value;
   return other;
 }
 function mergeTriggerPreferences(input,preserve) {
@@ -271,7 +338,7 @@ async function publicConfig() {
   const status=securityStatus();
   const historyConfig=history.config();
   if(settings.provider==='build')ensureBuildStatus();
-  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
+  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,layoutNoticeDismissed,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},...(settings.provider==='claude'?{claudeStatus:claudeSpendSummary()}:{}),historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
 }
 function broadcastTriggerGuideState() {
   for(const client of clients)send(client.port,{type:'TRIGGER_GUIDE_STATE',completed:triggerGuideCompleted,persisted:triggerGuidePersisted});
@@ -304,18 +371,37 @@ function rememberHistoryResult(ticket,result,comments=false,language=''){
   }).then(()=>notifyHistoryChanged()).catch(()=>{});
 }
 async function broadcastConfig() {
+  void settleOnboarding();
   const config=await publicConfig();
   for(const client of clients)send(client.port,{type:'CONFIG',...config,used:quotas[client.tabId]||0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});
   void chrome.runtime.sendMessage({type:'CONFIG',...config,oauthStatus:oauth.status()}).catch(()=>{});
 }
+async function activeFeedTab() {
+  const tabs=await chrome.tabs.query({active:true,lastFocusedWindow:true});
+  return tabs.find(tab=>isFeed(tab.pendingUrl||tab.url));
+}
 async function currentUILanguage() {
   try {
-    const tabs=await chrome.tabs.query({active:true,lastFocusedWindow:true});
-    const active=tabs.find(tab=>isFeed(tab.pendingUrl||tab.url));
+    const active=await activeFeedTab();
     const client=active&&[...clients].find(value=>value.tabId===active.id);
     if(client)return client.uiLanguage;
   } catch { /* The last reported public UI locale remains available. */ }
   return uiLanguage;
+}
+async function activeLayoutHealth() {
+  try { const active=await activeFeedTab();return active&&layoutStates[active.id]||null; }
+  catch { return null; }
+}
+function setLayoutState(tabId,report) {
+  if(!report&&!layoutStates[tabId])return;
+  if(report)layoutStates[tabId]=report;else delete layoutStates[tabId];
+  layoutStateWrites=layoutStateWrites.then(()=>chrome.storage.session.set({layoutStates:{...layoutStates}})).catch(()=>{});
+}
+function dismissLayoutNotice() {
+  layoutNoticeDismissed=chrome.runtime.getManifest().version;
+  for(const client of clients)send(client.port,{type:'LAYOUT_NOTICE_STATE',dismissed:layoutNoticeDismissed});
+  // Display-only preference; a failed write only means it can show again.
+  void chrome.storage.local.set({layoutNoticeDismissed}).catch(()=>{});
 }
 function updateUILanguage(client,value) {
   client.uiLanguage=UI.normalizeLanguage(value);uiLanguage=client.uiLanguage;
@@ -361,6 +447,19 @@ function sanitizePost(raw) {
       ...(depth<2&&Array.isArray(p.quotedContext)&&p.quotedContext.length?{quotedContext:p.quotedContext.slice(0,2).filter(quote=>quote&&typeof quote==='object'&&!Array.isArray(quote)).map(quote=>context(quote,depth+1))}:{})};
   };
   return {...context(raw),id,url,quotedContext:(Array.isArray(raw.quotedContext)?raw.quotedContext:[]).slice(0,2).filter(quote=>quote&&typeof quote==='object'&&!Array.isArray(quote)).map(quote=>context(quote,1))};
+}
+// The checked post's own links and Community Note. Only a post being fact
+// checked carries them; history records, comments and drafts never do. One
+// malformed entry is dropped rather than failing the check.
+function sanitizeCheckedPost(raw) {
+  const post=sanitizePost(raw);
+  const links=list=>(Array.isArray(list)?list:[]).map(link=>{
+    const url=Core.linkURL(link?.url);
+    return url&&{url,...(typeof link.title==='string'&&link.title?{title:link.title.slice(0,300)}:{})};
+  }).filter(Boolean);
+  const own=links(raw.links).slice(0,4),note=raw.communityNote,noteText=typeof note?.text==='string'?note.text.trim().slice(0,1500):'';
+  return {...post,...(own.length?{links:own}:{}),
+    ...(noteText?{communityNote:{text:noteText,links:links(note.links).slice(0,2).map(({url})=>({url}))}}:{})};
 }
 function sanitizeDraftImages(raw) {
   if(raw===undefined)return [];
@@ -451,26 +550,32 @@ function sanitizeDraft(raw) {
 function cacheKey(post, s, inputFingerprint) {
   const mode=Core.explanationMode(s);
   const prompts=['fact-check-prompts-v2-deeper',mode==='preset'?Core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
-  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.apiModel,s.language,s.webSearch,s.xSearch,
+  return JSON.stringify(['GrokFirst-v1',s.provider,Providers.resolve(s.provider).cacheIdentity(s,{task:'analysis',postContext:Core.claudeContextKey(post)}),s.language,s.webSearch,s.xSearch,
     'api-v11-context-images',mode,'only',
-    Core.apiPostIdentity(post,s),...prompts,selectedEffort(s)]);
+    Core.apiPostIdentity(post,s),...prompts,Core.providerEffort(s)]);
 }
 function sanitizeAnalysis(raw) {
   const value=typeof raw==='string'?{text:raw}:raw&&typeof raw==='object'?raw:{};
   return {text:Core.readerOutput(value.text,{final:true}).text.slice(0,30000),
     verificationStatus:typeof value.verificationStatus==='string'?value.verificationStatus.slice(0,40):'',
     warning:typeof value.warning==='string'?value.warning.slice(0,1000):'',
-    sources:(Array.isArray(value.sources)?value.sources:[]).slice(0,20).map(source=>({url:GrokFirstAPI.safeUrl(source?.url),title:typeof source?.title==='string'?source.title.slice(0,200):''})).filter(source=>source.url)};
+    sources:(Array.isArray(value.sources)?value.sources:[]).slice(0,20).map(source=>({url:GrokFirstAPI.safeUrl(source?.url),title:typeof source?.title==='string'?source.title.slice(0,200):''})).filter(source=>source.url),
+    ...verdictMetadata(value)};
+}
+function verdictMetadata(value) {
+  const {verdict,gaps}=Core.verdictView(value);
+  return {...(verdict?{verdict}:{}),...(gaps.length?{gaps}:{})};
 }
 function commentCacheKey(post,s,inputFingerprint,analysis) {
   const prompts=['comments-prompt-v1',s.commentsPrompt];
-  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.apiModel,s.language,Core.postFingerprint(post),analysis,...prompts,selectedEffort(s)]);
+  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,Providers.resolve(s.provider).cacheIdentity(s,{task:'comments'}),s.language,Core.postFingerprint(post),analysis,...prompts,Core.providerEffort(s)]);
 }
 function commentsJob(job) { return job.settings.task==='comments'; }
 function draftJob(job) { return job.settings.task==='draft'; }
-function billingMetadata(value,provider) { return ['api','build','oauth'].includes(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
+function billingMetadata(value,provider) { return Providers.has(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
+function remoteProvider(provider) { return Providers.get(provider)?.caps.remote===true; }
 function requestMetadata(value,provider) {
-  if(!['api','oauth'].includes(provider))return {};
+  if(!remoteProvider(provider))return {};
   let diagnostics;
   try{diagnostics=(Core.sanitizedRequestDiagnostics||GrokFirstAPI.sanitizedRequestDiagnostics)?.(value?.requestDiagnostics);}catch{/* Invalid diagnostic data is never forwarded. */}
   return diagnostics?{requestDiagnostics:diagnostics}:{};
@@ -478,7 +583,7 @@ function requestMetadata(value,provider) {
 const API_DIAGNOSTIC_CODES=new Set(['API_INCOMPLETE','API_STREAM_INTERRUPTED','API_STREAM_ERROR','API_LANGUAGE_MISMATCH','RATE_LIMIT','API_CAPACITY','API_IMAGE_INPUT','API_ERROR','CANCELED','TIMEOUT','COMMENTS_INVALID_RESPONSE']);
 function pruneAPIDiagnostics(input,now=Date.now()) {
   return (Array.isArray(input)?input:[]).slice(0,1000).flatMap(entry=>{
-    if(!entry||!API_DIAGNOSTIC_CODES.has(entry.code)||!Number.isSafeInteger(entry.recordedAt)||entry.recordedAt<0||entry.recordedAt>now||now-entry.recordedAt>=CACHE_TTL)return [];
+    if(!entry||!API_DIAGNOSTIC_CODES.has(entry.code)||!Number.isSafeInteger(entry.recordedAt)||entry.recordedAt<0||entry.recordedAt>now||now-entry.recordedAt>=DIAGNOSTICS_TTL)return [];
     const diagnostics=requestMetadata(entry,'api').requestDiagnostics;
     const verificationFailure=GrokFirstAPI.sanitizedVerificationFailure(entry.verificationFailure);
     return diagnostics?[{recordedAt:entry.recordedAt,code:entry.code,requestDiagnostics:diagnostics,...(verificationFailure?{verificationFailure}:{})}]:[];
@@ -497,7 +602,7 @@ function rememberAPIDiagnostics(job,value,code) {
   // Unpublished draft tasks never write provider diagnostics to storage. Even
   // a nominally redacted upstream error may echo a fragment of private input.
   if(draftJob(job))return;
-  if(!['api','oauth'].includes(job.settings.provider)||job.diagnosticsRecorded||!API_DIAGNOSTIC_CODES.has(code))return;
+  if(Providers.get(job.settings.provider)?.caps.persistDiagnostics!==true||job.diagnosticsRecorded||!API_DIAGNOSTIC_CODES.has(code))return;
   const diagnostics=requestMetadata(value,'api').requestDiagnostics;
   if(!diagnostics)return;
   job.diagnosticsRecorded=true;
@@ -546,32 +651,116 @@ function withBillingMetadata(value,provider,verificationMode) {
   return {...result,...billingMetadata(value,provider),...verificationMetadata(value,verificationMode),...requestMetadata(value,provider)};
 }
 function jobError(job,error,code,extra={}) { send(job.client.port,{type:commentsJob(job)?'COMMENT_ERROR':'ERROR',requestId:job.requestId,error,code,retryAttempts:job.retryAttempts||0,...extra}); }
-function freshCacheEntry(entry,now) {
-  return entry&&typeof entry==='object'&&!Array.isArray(entry)&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<CACHE_TTL
+function cacheRetention() { return Core.cacheRetention(settings,historyEnabled); }
+function plainObject(value) { return Boolean(value)&&typeof value==='object'&&!Array.isArray(value); }
+function freshCacheEntry(entry,now,retention=cacheRetention()) {
+  return plainObject(entry)&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<retention.ttlMs
     &&(typeof entry.text!=='string'||Core.readerOutput(entry.text,{final:true}).kind==='content');
 }
-function pruneCache(input,now=Date.now()) {
-  const entries=input&&typeof input==='object'&&!Array.isArray(input)?Object.entries(input):[];
-  const recent=entries.filter(([,value])=>freshCacheEntry(value,now)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,160);
+// Eviction is oldest-generated first, whatever was reused most recently.
+function pruneCache(input,now=Date.now(),retention=cacheRetention()) {
+  const entries=plainObject(input)?Object.entries(input):[];
+  const recent=entries.filter(([,value])=>freshCacheEntry(value,now,retention)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,retention.maxEntries);
   const kept=[];let bytes=0;
-  for(const entry of recent){bytes+=new TextEncoder().encode(JSON.stringify(entry)).byteLength;if(bytes>4_000_000)break;kept.push(entry);}
+  for(const entry of recent){bytes+=new TextEncoder().encode(JSON.stringify(entry)).byteLength;if(bytes>retention.maxBytes)break;kept.push(entry);}
   return Object.fromEntries(kept);
 }
 function cachedResult(key) { const entry = cache[key]; if (freshCacheEntry(entry,Date.now())) return entry; delete cache[key]; return null; }
+function cachePartition(key) { try{return JSON.parse(key);}catch{return [];} }
+// Drops every answer the predicate matches (and any unreadable key), in
+// memory and in storage. The epoch bump stops running jobs from re-adding one.
+function purgeCacheEntries(predicate) {
+  for(const key of Object.keys(cache)){const partition=cachePartition(key);if(!partition.length||predicate(partition))delete cache[key];}
+  // Storage is written once startup has restored it, never over it.
+  const epoch=++cacheEpoch;return Promise.resolve().then(()=>ready).then(()=>persistCache(epoch));
+}
+// Drops one connection's answers. `keep` sees each entry's cache identity
+// (the registry's cacheIdentity) and may spare answers that are still valid.
+function dropProviderCache(id,keep=()=>false) { return purgeCacheEntries(partition=>partition[1]===id&&!keep(partition[2])); }
+function removeStoredCache(area) { return area==='local'?chrome.storage.local.remove(LOCAL_CACHE_KEY):chrome.storage.session.remove('cache'); }
+// Answers live in the area the current retention names. A copy left in the
+// other area by a retention change joins them once and is then removed.
+async function restoreCache(localCopy,sessionCopy) {
+  const persisted=cacheRetention().area==='local';
+  const active=persisted?localCopy:sessionCopy,inactive=persisted?sessionCopy:localCopy;
+  cache=pruneCache({...(plainObject(inactive)?inactive:{}),...(plainObject(active)?active:{})});
+  const changed=active!==undefined&&(!plainObject(active)||Object.keys(active).length!==Object.keys(cache).length);
+  if(!changed&&inactive===undefined)return;
+  try{
+    await persistCache(cacheEpoch);
+    if(inactive!==undefined)await removeStoredCache(persisted?'session':'local');
+  }catch{/* Clean memory stays usable if cleanup fails; later cache writes retry. */}
+}
+// Called after settings or history recording change. Shortening the period
+// drops older answers at once; changing area moves the answers kept.
+async function applyCacheRetention(previous) {
+  const next=cacheRetention();
+  if(next===previous)return true;
+  cache=pruneCache(cache);
+  try{
+    await persistCache(cacheEpoch);
+    if(next.area!==previous.area)await removeStoredCache(previous.area);
+    return true;
+  }catch{return false;}
+}
+// Expired answers leave storage within about an hour while the browser runs.
+function pruneStoredCache() {
+  const kept=pruneCache(cache);
+  if(Object.keys(kept).length===Object.keys(cache).length)return Promise.resolve();
+  cache=kept;return persistCache(cacheEpoch);
+}
+function triageKey(post) { return JSON.stringify(['triage-v1',Core.CLAUDE_TRIAGE_MODEL,Core.canonicalPostUrl(post.url),Core.postFingerprint(post)]); }
+function freshTriage(entry,now) {
+  return entry&&typeof entry==='object'&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<TRIAGE_TTL&&Core.sanitizeTriage(entry.triage)!==null;
+}
+function pruneTriageCache(input,now=Date.now()) {
+  const entries=input&&typeof input==='object'&&!Array.isArray(input)?Object.entries(input):[];
+  return Object.fromEntries(entries.filter(([,value])=>freshTriage(value,now)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,TRIAGE_CACHE_LIMIT));
+}
+function cachedTriage(post) {
+  const key=triageKey(post),entry=triageCache[key];
+  if(freshTriage(entry,Date.now()))return Core.sanitizeTriage(entry.triage);
+  delete triageCache[key];return null;
+}
+function automaticSkip(post,s,triggerKind) {
+  if(!Core.automaticTrigger(triggerKind))return null;
+  const local=Core.triagePrefilter(post);
+  if(local||Core.triageApplies(s,triggerKind)!=='skip')return local;
+  const screened=cachedTriage(post);
+  return screened?.checkable==='no'?screened:null;
+}
+// The page learns only which label to show, never the screen's other codes.
+function triageView(triage) { return {kind:Core.triageSkipKind(triage),local:triage.local===true}; }
+// Only a complete model screen is kept; local and failed screens are not.
+function rememberTriage(post,triage) {
+  triageCache=pruneTriageCache({...triageCache,[triageKey(post)]:{triage,completedAt:Date.now()}});
+  cacheWrites=cacheWrites.catch(()=>{}).then(()=>chrome.storage.session.set({claudeTriageCache:{...triageCache}}));
+  void cacheWrites.catch(()=>{});
+}
 function persistQuotas() {
   // Concurrent reservations and resets must not leave an older storage snapshot
   // behind a newer one. Read the latest counters when this write starts.
   quotaWrites=quotaWrites.catch(()=>{}).then(()=>chrome.storage.session.set({quotas:{...quotas}}));
   return quotaWrites;
 }
+// Writes coalesce: while one waits its turn, later calls share it, and it
+// saves the newest snapshot when it starts. A burst of answers rewrites the
+// stored cache at most twice, which matters once it lives on disk.
 function persistCache(epoch) {
-  cacheWrites=cacheWrites.catch(()=>{}).then(()=>epoch===cacheEpoch?chrome.storage.session.set({cache:{...cache}}):undefined);
-  return cacheWrites;
+  if(pendingCacheWrite){pendingCacheWrite.epoch=epoch;return pendingCacheWrite.promise;}
+  const pending={epoch};
+  pending.promise=cacheWrites.catch(()=>{}).then(()=>{
+    if(pendingCacheWrite===pending)pendingCacheWrite=undefined;
+    if(pending.epoch!==cacheEpoch)return;
+    const snapshot={...cache};
+    return cacheRetention().area==='local'?chrome.storage.local.set({[LOCAL_CACHE_KEY]:snapshot}):chrome.storage.session.set({cache:snapshot});
+  });
+  pendingCacheWrite=pending;cacheWrites=pending.promise;return pending.promise;
 }
 function clearStoredCache() {
-  cache={};cacheEpoch++;
+  cache={};triageCache={};cacheEpoch++;pendingCacheWrite=undefined;
   cacheWrites=cacheWrites.catch(()=>{}).then(async()=>{
-    const results=await Promise.allSettled([chrome.storage.session.remove('cache'),chrome.storage.local.remove('cache')]);
+    const results=await Promise.allSettled([chrome.storage.session.remove(['cache','claudeTriageCache']),chrome.storage.local.remove(['cache',LOCAL_CACHE_KEY])]);
     const failed=results.find(value=>value.status==='rejected');
     if(failed)throw failed.reason;
   });
@@ -600,18 +789,52 @@ function waitForAbort(promise, signal) {
   });
 }
 
-async function openSettings(focus) {
+async function openSettings(focus,setupEntry=false) {
   // Replace stale focus requests even when the caller uses a generic Settings
   // entry point or sends an unlock target from an older content script.
-  try { await chrome.storage.session.set({superxOptionsFocus:{id:focus==='oauth'||settings.provider==='oauth'?'oauth':focus==='build'||settings.provider==='build'?'build':'api-key',nonce:crypto.randomUUID()}}); }
+  try { await chrome.storage.session.set({superxOptionsFocus:{id:Providers.settingsFocus(focus,settings.provider),nonce:crypto.randomUUID()}}); }
   catch { /* The settings page remains reachable when session storage fails. */ }
+  // Until the first setup is finished or skipped, the rail and popup "set me
+  // up" entry points lead to the short guide instead of the full page.
+  if(setupEntry&&!providerAllowsCalls()&&await onboardingPending()){await openOnboarding();return;}
   await chrome.runtime.openOptionsPage();
+}
+async function onboardingPending(){
+  try{return (await chrome.storage.local.get('onboarding')).onboarding?.state==='pending';}catch{return false;}
+}
+// A pending guide is finished once any connection is ready, however it was
+// made (the guide, Settings or the popup). Losing readiness later must lead
+// to Settings, never back to the first-run guide.
+let onboardingSettled=false;
+async function settleOnboarding(){
+  if(onboardingSettled||!providerAllowsCalls())return;
+  onboardingSettled=true;
+  try{
+    const record=(await chrome.storage.local.get('onboarding')).onboarding;
+    if(record?.state==='pending')await chrome.storage.local.set({onboarding:{...record,state:'done',at:Date.now()}});
+  }catch{onboardingSettled=false;}
+}
+async function openOnboarding(){await chrome.tabs.create({url:chrome.runtime.getURL('onboarding.html')});}
+// A fresh install starts with "Only when I click" and opens the setup guide.
+// An update opens the guide once for a profile that never connected, and
+// never touches its triggers. The onboarding record makes this idempotent.
+async function startOnboarding(reason){
+  if(startupProfile.credential||reason==='install'&&startupProfile.settings)return;
+  const stored=await chrome.storage.local.get(['onboarding',SuperXOAuth.STORAGE_KEY]);
+  if(stored.onboarding!==undefined||stored[SuperXOAuth.STORAGE_KEY]!==undefined)return;
+  if(reason==='install')await queueSettingsMutation(()=>({...settings,triggerMode:'custom',enabled:true,customTriggers:{...settings.customTriggers,...Core.CLICK_ONLY_TRIGGERS}}));
+  await chrome.storage.local.set({onboarding:{version:1,state:'pending',at:Date.now()}});
+  await openOnboarding();
 }
 async function openHistory(){await chrome.tabs.create({url:chrome.runtime.getURL('history.html')});}
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== 'GROKFIRST_FEED' || port.sender?.frameId !== 0 || !isFeed(port.sender?.url)) { port.disconnect(); return; }
-  const client = {port,tabId:port.sender.tab.id,pageUrl:port.sender.url,cancelEpoch:0,uiLanguage:null,requestCancellations:new Map()}; clients.add(client);
-  ready.then(async()=>{client.uiLanguage=UI.normalizeLanguage(client.uiLanguage || uiLanguage);send(port,{type:'CONFIG',...await publicConfig(),used:quotas[client.tabId] || 0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});}).catch(()=>send(port,{type:'FATAL',error:'扩展初始化失败，请重新加载扩展。'}));
+  const client = {port,tabId:port.sender.tab.id,pageUrl:port.sender.url,cancelEpoch:0,uiLanguage:null,requestCancellations:new Map(),reusedAnswers:new Set()}; clients.add(client);
+  ready.then(async()=>{
+    // A new port is a new page or a woken worker; the page re-reports a
+    // broken layout itself, so an older report must not outlive its page.
+    setLayoutState(client.tabId,null);
+    client.uiLanguage=UI.normalizeLanguage(client.uiLanguage || uiLanguage);send(port,{type:'CONFIG',...await publicConfig(),used:quotas[client.tabId] || 0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});}).catch(()=>send(port,{type:'FATAL',error:'扩展初始化失败，请重新加载扩展。'}));
   port.onMessage.addListener(message=>{
     const receivedEpoch=client.cancelEpoch,receivedRevision=revision,receivedCredentialGeneration=securityGeneration,receivedBuildGeneration=buildConnectionGeneration,receivedOAuthGeneration=oauthGeneration;
     const messageRequestId=String(message.requestId || '').slice(0,80);
@@ -633,7 +856,7 @@ chrome.runtime.onConnect.addListener(port => {
         const oauthState=settings.provider==='oauth'?oauth.status():null;
         if(oauthState&&!oauthState.credentialId){miss(['restoring','refreshing'].includes(oauthState.state));return;}
         let post;
-        try{post=sanitizePost(message.post);}catch{miss(false);return;}
+        try{post=sanitizeCheckedPost(message.post);}catch{miss(false);return;}
         const snapshot={...settings,...(oauthState?{oauthCredentialId:oauthState.credentialId}:{})};
         const result=cachedResult(cacheKey(post,snapshot,Core.postFingerprint(post)));
         if(!result){miss(false);return;}
@@ -644,9 +867,11 @@ chrome.runtime.onConnect.addListener(port => {
         if(trustedFeed(port.sender))completeTriggerGuide();
         return;
       }
+      if(message.type==='LAYOUT_HEALTH'){if(trustedFeed(port.sender))setLayoutState(client.tabId,Core.layoutReport(message.report));return;}
+      if(message.type==='DISMISS_LAYOUT_NOTICE'){if(trustedFeed(port.sender))dismissLayoutNotice();return;}
       if(message.type==='UI_LANGUAGE') { await updateUILanguage(client,message.language);return; }
       if(message.type==='CANCEL_ALL') { cancelClient(client); return; }
-      if(message.type==='OPEN_SETTINGS') { await openSettings(message.focus); return; }
+      if(message.type==='OPEN_SETTINGS') { await openSettings(message.focus,true); return; }
       if(message.type==='OPEN_HISTORY'&&trustedFeed(port.sender)){await openHistory();return;}
       if(message.type==='HISTORY_VISIT'){
         // No Key, provider call or dwell timer is required to record visibility.
@@ -694,7 +919,7 @@ chrome.runtime.onConnect.addListener(port => {
       if(!settings.enabled&&!comments&&!draft) { report('已暂停自动分析。','PAUSED'); return; }
       if(railStates[client.tabId]&&!draft){report('右栏已收起。','RAIL_COLLAPSED');return;}
       let post,inputFingerprint;
-      try { if(draft)post=sanitizeDraft(message.draft);else {inputFingerprint=Core.postFingerprint(message.post);post=sanitizePost(message.post);} } catch(e) { report(draft?'请输入有效的草稿和回复上下文。':e.message,draft?'DRAFT_INVALID':'POST_INVALID'); return; }
+      try { if(draft)post=sanitizeDraft(message.draft);else {inputFingerprint=Core.postFingerprint(message.post);post=comments?sanitizePost(message.post):sanitizeCheckedPost(message.post);} } catch(e) { report(draft?'请输入有效的草稿和回复上下文。':e.message,draft?'DRAFT_INVALID':'POST_INVALID'); return; }
       const triggerKind=message.triggerKind===undefined?(message.force===true?'recheck':'automatic'):message.triggerKind;
       let pageUrl=typeof message.pageUrl==='string'?message.pageUrl:client.pageUrl;
       const detailTrigger=triggerKind==='detail-main'||triggerKind==='detail-reply';
@@ -708,7 +933,14 @@ chrome.runtime.onConnect.addListener(port => {
       const fingerprint=draft?null:comments?commentCacheKey(post,snapshot,inputFingerprint,analysis):cacheKey(post,snapshot,inputFingerprint);
       const ticket=draft?null:historyTicket(post,snapshot),historyLanguage=draft?'':Core.resolvePostLanguage(snapshot.language,post);
       const cached=draft||message.force ? null : cachedResult(fingerprint);
-      if(cached) { rememberHistoryResult(ticket,cached,comments,historyLanguage);send(port,comments?{type:'COMMENT_RESULT',requestId,comments:cached.comments,cached:true,...billingMetadata(cached,snapshot.provider)}:{type:'RESULT',requestId,result:withBillingMetadata(cached,snapshot.provider,snapshot.apiVerification),cached:true}); return; }
+      if(cached) {
+        // A reuse counts once per page, however often the post re-renders.
+        if(!client.reusedAnswers.has(fingerprint)){client.reusedAnswers.add(fingerprint);recordCacheReuse(cached,snapshot.provider);}
+        rememberHistoryResult(ticket,cached,comments,historyLanguage);send(port,comments?{type:'COMMENT_RESULT',requestId,comments:cached.comments,cached:true,...billingMetadata(cached,snapshot.provider)}:{type:'RESULT',requestId,result:withBillingMetadata(cached,snapshot.provider,snapshot.apiVerification),cached:true}); return; }
+      // A free screen, or a saved Claude screen, stops an automatic check of a
+      // post without a checkable claim before it costs anything.
+      const skip=!comments&&!draft&&automaticSkip(post,snapshot,triggerKind);
+      if(skip){send(port,{type:'TRIAGE_SKIP',requestId,triage:triageView(skip)});return;}
       const config=await publicConfig();
       if(!clients.has(client)||client.cancelEpoch!==receivedEpoch||receivedRevision!==revision||client.requestCancellations.get(requestId)!==receivedCancellation||!currentCredentials())return;
       if(!comments&&!draft){
@@ -742,7 +974,7 @@ chrome.runtime.onConnect.addListener(port => {
 function liveJob(job) {
   return runningJobs.has(job) && jobs.get(job.key)===job && !job.controller.signal.aborted && job.revision===revision && job.clientEpoch===job.client.cancelEpoch && clients.has(job.client);
 }
-function apiLimit(s) { return s.provider==='build'?1:Math.max(1,Math.min(8,Math.trunc(Number(s.apiConcurrency))||3)); }
+function apiLimit(s) { return Providers.get(s.provider)?.maxConcurrency??Math.max(1,Math.min(8,Math.trunc(Number(s.apiConcurrency))||3)); }
 const API_BUDGET_CODES=new Set(['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded']);
 function apiBudgetFailure(value) {
   const supplied=GrokFirstAPI.sanitizedVerificationFailure(value?.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure(value?.partialResult?.verificationFailure);
@@ -792,8 +1024,9 @@ function aggregateBilling(job,current={}){
   const usage=GrokFirstAPI.mergeUsage(...values.map(value=>value.usage));
   const model=[...values].reverse().find(value=>value.model)?.model;
   const usageByStage={};
-  for(const name of ['url','explain','verify','inline','comments']){
-    const reported=values.map(value=>value.usageByStage?.[name]||(name===stage?value.usage:undefined)).filter(Boolean);
+  for(const name of ['url','explain','triage','verify','inline','comments']){
+    // A pre-screen reports only its own stage; never count it as the check.
+    const reported=values.map(value=>value.usageByStage?.[name]||(!value.usageByStage&&name===stage?value.usage:undefined)).filter(Boolean);
     if(reported.length)usageByStage[name]=GrokFirstAPI.mergeUsage(...reported);
   }
   const modelByStage=Object.assign({},...values.map(value=>value.modelByStage||{}),model?{[stage]:model}:{});
@@ -881,15 +1114,21 @@ async function executeJob(job) {
         if(text.trim())job.retainedFactCheck={...sanitizeAnalysis({...update,text}),...job.billing,provider:job.settings.provider,apiVerification:'only',verified:false,searched:update.searched===true};
         else if(job.attemptHasReaderText||!job.retryAttempts)delete job.retainedFactCheck;
       }
-      if(liveJob(job)&&!commentsJob(job))send(client.port,{type:'UPDATE',requestId,...(hasText&&(text.trim()||job.attemptHasReaderText||!job.retainedFactCheck)?{text}:{}),phase:update.phase,
+      // A text snapshot always states its verdict, so a reset clears the badge.
+      if(liveJob(job)&&!commentsJob(job))send(client.port,{type:'UPDATE',requestId,...(hasText&&(text.trim()||job.attemptHasReaderText||!job.retainedFactCheck)?{text,verdict:Core.verdictView(update).verdict}:{}),phase:update.phase,
         verificationStatus:update.verificationStatus,warning:update.warning,...(!hasText||text.trim()||job.attemptHasReaderText||!job.retainedFactCheck?{sources:update.sources}:{}),...aggregateBilling(job,job.billing),...verificationMetadata(update,job.settings.apiVerification,text||'')});
     };
     const result=withBillingMetadata(await (job.settings.provider==='build'?runAPI(job,onUpdate):waitForAbort(trackedAPICall(job,onUpdate),signal)),job.settings.provider,commentsJob(job)?undefined:job.settings.apiVerification);
     if(!liveJob(job))return;
     job.billing={...job.billing,...billingMetadata(result,job.settings.provider)};
     if(result.requestDiagnostics)job.requestDiagnostics=result.requestDiagnostics;
+    // A skipped post leaves no answer, cache entry or history record.
+    if(result.triageSkip){
+      releaseAPISlot(job);pump();
+      send(client.port,{type:'TRIAGE_SKIP',requestId,triage:triageView(result.triageSkip),...aggregateBilling(job,job.billing)});return;
+    }
 
-    if(['api','oauth'].includes(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
+    if(remoteProvider(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
     if(commentsJob(job))result.comments=GrokFirstAPI.validateComments(result.comments);
     else {
       const reader=Core.readerOutput(result.text,{final:true});
@@ -897,7 +1136,7 @@ async function executeJob(job) {
         // The current attempt's empty/tool-only final retracts its own stream.
         // It must not destroy a genuine partial retained from an earlier try.
         job.retainedFactCheck=job.previousPartial;
-        send(client.port,{type:'UPDATE',requestId,text:job.previousPartial?.text||'',sources:job.previousPartial?.sources||[],phase:'verify',verificationStatus:'pending',...aggregateBilling(job,job.billing)});
+        send(client.port,{type:'UPDATE',requestId,text:job.previousPartial?.text||'',verdict:job.previousPartial?.verdict||null,sources:job.previousPartial?.sources||[],phase:'verify',verificationStatus:'pending',...aggregateBilling(job,job.billing)});
         throw Object.assign(new Error('Grok 未返回可显示的核查答案，可手动重试。'),{code:'API_INCOMPLETE',verificationFailure:{stage:'verify',code:'INCOMPLETE',errorCode:'API_INCOMPLETE'},...job.billing});
       }
       result.text=reader.text.slice(0,30000);
@@ -939,8 +1178,8 @@ async function executeJob(job) {
       const partialResult=partialText?withBillingMetadata({...retained,...errorBilling,...diagnosticMetadata,text:partialText,verificationStatus:'incomplete'},job.settings.provider,job.settings.apiVerification):undefined;
       if(partialResult&&!commentsJob(job))job.retainedFactCheck=sanitizeAnalysis(partialResult);
       const safeError=e.code==='MODEL_UNSUPPORTED'?GrokFirstAPI.publicError(e):job.settings.provider==='build'?SuperXBuild.publicError(e):GrokFirstAPI.publicError(e);
-      const budgetFailure=['api','oauth'].includes(job.settings.provider)?apiBudgetFailure(e):undefined;
-      const capacityFailure=['api','oauth'].includes(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
+      const budgetFailure=remoteProvider(job.settings.provider)?apiBudgetFailure(e):undefined;
+      const capacityFailure=remoteProvider(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
       if(partialResult&&!draftJob(job))rememberHistoryResult(job.historyTicket,{...partialResult,completedAt:Date.now()},false,job.historyLanguage);
       rememberAPIDiagnostics(job,{...diagnosticMetadata,verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},safeError.code);
       const failureMetadata={...errorBilling,...diagnosticMetadata,...(commentsJob(job)?(budgetFailure||capacityFailure?{verificationFailure:budgetFailure||capacityFailure}:{}):{...verificationMetadata({verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},job.settings.apiVerification),partialResult})};
@@ -985,6 +1224,22 @@ async function runAPI(job,onUpdate) {
     if(commentsJob(job))return GrokFirstAPI.generateComments(job.post,job.settings,undefined,{analysis:job.analysis,signal,authorization});
     return GrokFirstAPI.run(job.post,job.settings,undefined,{signal,onUpdate,authorization});
   }
+  if(job.settings.provider==='claude'){
+    const key=claudeKey;
+    if(!SuperXClaude.validKey(key))throw Object.assign(new Error('请打开设置并输入 Claude API Key。'),{code:'NEEDS_KEY'});
+    if(claudeSpendSummary().exhausted)throw Object.assign(new Error('已达到本周期的 Claude 花费上限。'),{code:'CLAUDE_BUDGET'});
+    let runSettings=job.settings,route;
+    const mode=postJob(job)?Core.triageApplies(job.settings,job.triggerKind):null;
+    if(mode){
+      // Retries reuse the first plan, so a post is screened and paid for once.
+      const plan=job.triagePlan||=await planClaude(job,mode,key,onUpdate);
+      if(plan.skip)return {triageSkip:plan.skip};
+      if(job.settings.claudeModel===Core.CLAUDE_AUTO){route=plan.route;runSettings={...job.settings,claudeRoute:route.model};}
+    }
+    // Every finished or failed attempt adds the cost it reported, once.
+    const call=commentsJob(job)?GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal}):GrokFirstAPI.run(job.post,runSettings,key,{signal,onUpdate});
+    return call.then(value=>{recordClaudeSpend(value?.usage);return route?{...value,claudeRoute:route}:value;},error=>{recordClaudeSpend(error?.usage||error?.partialResult?.usage);throw error;});
+  }
   if(job.settings.provider!=='api')throw Object.assign(new Error('Unknown answer source.'),{code:'PROVIDER_UNAVAILABLE'});
   const session=await waitForAbort(chrome.storage.session.get('apiKey'),signal);
   const key=session.apiKey;
@@ -992,6 +1247,38 @@ async function runAPI(job,onUpdate) {
   if(!validKey(key))throw Object.assign(new Error('请打开设置并输入 API Key。'),{code:'NEEDS_KEY'});
   if(commentsJob(job))return GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal});
   return GrokFirstAPI.run(job.post,job.settings,key,{signal:job.controller.signal,onUpdate});
+}
+// Screening failures the check itself would hit too pass through to the
+// normal error and retry paths. Any other failure fails open: no skip, Haiku.
+const TRIAGE_PASS_THROUGH_CODES=new Set(['NEEDS_KEY','CLAUDE_BUDGET','RATE_LIMIT','API_CAPACITY']);
+async function planClaude(job,mode,key,onUpdate) {
+  const screen=Core.triagePrefilter(job.post)||cachedTriage(job.post)||await screenPost(job,key,onUpdate);
+  if(mode==='skip'&&screen.checkable==='no')return {skip:screen};
+  return {route:Core.triageRoute(screen)};
+}
+async function screenPost(job,key,onUpdate) {
+  onUpdate({phase:'triage'});
+  const signal=job.controller.signal,child=new AbortController(),abort=()=>child.abort();
+  signal.addEventListener('abort',abort,{once:true});
+  const timer=setTimeout(abort,TRIAGE_TIMEOUT_MS);
+  // The screen joins the card's usage as its own stage. An error that passes
+  // through carries its usage to the job's error path instead.
+  const bill=value=>{
+    if(Object.keys(value?.usage||{}).length)job.completedBilling.push(billingMetadata({usage:value.usage,usageComplete:value.usageComplete,model:value.model,usageByStage:{triage:value.usage},modelByStage:{triage:value.model}},'claude'));
+  };
+  try {
+    const value=await GrokFirstAPI.triage(job.post,job.settings,key,{signal:child.signal});
+    recordClaudeSpend(value.usage);bill(value);rememberTriage(job.post,value.triage);
+    return value.triage;
+  } catch(error) {
+    recordClaudeSpend(error?.usage);
+    const status=error?.requestDiagnostics?.transportStatus;
+    if(signal.aborted||TRIAGE_PASS_THROUGH_CODES.has(error?.code)||status===401||status===403)throw error;
+    bill(error);
+    return {failed:true};
+  } finally {
+    clearTimeout(timer);signal.removeEventListener('abort',abort);
+  }
 }
 function invalidateSecurityJobs() {
   revision++;
@@ -1103,6 +1390,7 @@ function queueSecurityMutation(message) {
 }
 async function saveSettings(input) {
   const next=Core.normalizeSettings(input);
+  const retention=cacheRetention();
   if(JSON.stringify(next)!==JSON.stringify(settings)) {
     const modelChanged=next.apiModel!==settings.apiModel;
     const cancelsJobs=JSON.stringify(paidTaskSettings(next))!==JSON.stringify(paidTaskSettings(settings));
@@ -1125,16 +1413,33 @@ async function saveSettings(input) {
     if(modelChanged)await clearAPICapacityPause();
   }
   if(providerFault){providerFault=false;await chrome.storage.local.remove('invalidAnswerSource');}
+  const cacheStored=await applyCacheRetention(retention);
   await broadcastConfig();
+  return cacheStored;
 }
 function queueSettingsMutation(input) {
   const operation=securityWrites.catch(()=>{}).then(async()=>{
     await ready;
-    await saveSettings(typeof input==='function'?input():input);
-    return {ok:true};
+    const cacheStored=await saveSettings(typeof input==='function'?input():input);
+    return cacheStored?{ok:true}:{ok:false,errorKey:'options.cacheStorageError'};
   });
   securityWrites=operation;
   return operation;
+}
+async function saveClaudeKey(message){
+  const raw=typeof message.apiKey==='string'?message.apiKey.trim():'';
+  if(raw&&!SuperXClaude.validKey(raw))return {ok:false,errorKey:'claude.keyInvalid'};
+  if(message.settings!==undefined&&Core.normalizeSettings(message.settings).provider!=='claude'&&raw)return {ok:false,errorKey:'options.providerChoice'};
+  for(const job of [...jobs.values()].filter(job=>job.settings.provider==='claude'))abortJob(job);
+  try{
+    if(raw){const envelope=await ClaudeKeyStore.seal(raw);await chrome.storage.local.set({claudeApiKeyEncrypted:envelope});claudeKey=raw;}
+    else{claudeKey='';await chrome.storage.local.remove('claudeApiKeyEncrypted');await ClaudeKeyStore.clear();}
+  }catch{return {ok:false,errorKey:'claude.keyStorageError'};}
+  void dropProviderCache('claude').catch(()=>{});
+  if(message.settings!==undefined)await saveSettings(mergeTriggerPreferences(Core.normalizeSettings(message.settings),message.triggerPreferencesChanged===false));
+  else await broadcastConfig();
+  pump();
+  return {ok:true,...claudeSpendSummary()};
 }
 async function handleOAuthMessage(message,actionGeneration){
   if(message.type==='GET_OAUTH_STATUS')return {ok:true,oauthStatus:oauth.status()};
@@ -1151,8 +1456,7 @@ async function handleOAuthMessage(message,actionGeneration){
   }else if(message.type==='OAUTH_CANCEL_LOGIN')state=await oauth.cancelLogin();
   else if(message.type==='OAUTH_LOGOUT'){
     state=await oauth.logout();
-    for(const key of Object.keys(cache)){try{if(JSON.parse(key)[1]==='oauth')delete cache[key];}catch{delete cache[key];}}
-    cacheEpoch++;await persistCache(cacheEpoch).catch(()=>{});
+    await dropProviderCache('oauth').catch(()=>{});
   }else if(message.type==='OAUTH_SET_REMEMBER')state=await oauth.setRemember(message.remember);
   else if(message.type==='OAUTH_REFRESH_CATALOG')state=await oauth.catalog();
   if(state&&['OAUTH_LOGIN','OAUTH_START_LOGIN','OAUTH_SET_REMEMBER'].includes(message.type)&&typeof state.remember==='boolean'){
@@ -1177,7 +1481,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     const raw=message.apiKey,apiKey=typeof raw==='string'?raw.trim():raw==null?'':null;
     if(apiKey===null||typeof raw==='string'&&(/[\r\n]/.test(raw)||raw.trim()&&!validKey(raw))) {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
     if(message.remember!==undefined&&typeof message.remember!=='boolean') {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
-    if(message.settings?.provider!==undefined&&!['api','oauth','build'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!Providers.has(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=message.settings===undefined?undefined:Core.normalizeSettings(message.settings);
     if(next&&!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     queueSecurityMutation({apiKey,remember:message.remember,settings:next,triggerPreferencesChanged:message.triggerPreferencesChanged})
@@ -1204,7 +1508,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     return true;
   }
   if(trustedUI(sender) && message?.type==='SAVE_SETTINGS') {
-    if(message.settings?.provider!==undefined&&!['api','oauth','build'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!Providers.has(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=Core.normalizeSettings(message.settings);
     if(!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     // Join the credential chain at receipt so even same-tick saves apply in the
@@ -1214,7 +1518,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   }
   (async()=>{
     await ready;
-    if(message?.type==='OPEN_SETTINGS' && (trustedUI(sender)||trustedFeed(sender))) {await openSettings(message.focus);return {ok:true};}
+    if(message?.type==='OPEN_SETTINGS' && (trustedUI(sender)||trustedFeed(sender))) {await openSettings(message.focus,trustedFeed(sender)||new URL(sender.url).pathname==='/popup.html');return {ok:true};}
     if(message?.type==='OPEN_HISTORY' && (trustedUI(sender)||trustedFeed(sender))) {await openHistory();return {ok:true};}
     if(!trustedUI(sender)) return {ok:false,error:'此操作仅允许在扩展设置页中执行。'};
     if(message.type==='GET_UI_LANGUAGE')return {ok:true,language:await currentUILanguage()};
@@ -1229,7 +1533,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(message.type==='SAVE_BUILD_CONNECTION')return queueBuildConnection(message);
     if(message.type==='CLEAR_BUILD_CONNECTION')return queueBuildConnection(message,true);
     if(message.type==='GET_BUILD_STATUS')return checkBuildDraft(message);
-    if(message.type==='GET_CONFIG'){if(settings.provider==='build')await refreshBuildStatus();return {ok:true,...await publicConfig(),oauthStatus:oauth.status()};}
+    if(message.type==='GET_CONFIG'){if(settings.provider==='build')await refreshBuildStatus();return {ok:true,...await publicConfig(),oauthStatus:oauth.status(),layoutHealth:await activeLayoutHealth()};}
     if(message.type==='GET_API_DIAGNOSTICS')return getAPIDiagnostics();
     if(message.type==='CLEAR_API_DIAGNOSTICS')return clearAPIDiagnostics();
     if(message.type==='GET_HISTORY'||message.type==='GET_HISTORY_STATUS'){
@@ -1240,10 +1544,27 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
       if(message.type==='DELETE_HISTORY'&&!/^\d{1,25}$/.test(String(message.id||''))||message.type==='SET_HISTORY_ENABLED'&&typeof message.enabled!=='boolean')return {ok:false,errorKey:'history.storageError'};
       try{
         const result=await (message.type==='CLEAR_HISTORY'?history.clear():message.type==='DELETE_HISTORY'?history.delete(message.id):history.setEnabled(message.enabled));
+        if(message.type==='SET_HISTORY_ENABLED'){const retention=cacheRetention();historyEnabled=result.enabled;await applyCacheRetention(retention);}
         await broadcastHistoryConfig();return {ok:true,...scopedHistory(result)};
       }catch{return {ok:false,errorKey:'history.storageError'};}
     }
     if(message.type==='CLEAR_CACHE') { await clearStoredCache();return {ok:true}; }
+    if(message.type==='GET_CACHE_STATS')return {ok:true,...cacheStats,historyEnabled};
+    if(message.type==='RESET_CACHE_STATS'){
+      cacheStats={since:0,hits:0,tokens:0,usd:0};
+      try{await persistCacheStats();}catch{return {ok:false,errorKey:'options.cacheStorageError'};}
+      return {ok:true,...cacheStats,historyEnabled};
+    }
+    if(message.type==='GET_CLAUDE_STATUS')return {ok:true,...claudeSpendSummary()};
+    if(message.type==='SAVE_CLAUDE_KEY'||message.type==='CLEAR_CLAUDE_KEY'){
+      const operation=securityWrites.catch(()=>{}).then(()=>saveClaudeKey(message.type==='CLEAR_CLAUDE_KEY'?{apiKey:''}:message));
+      securityWrites=operation;return operation;
+    }
+    if(message.type==='RESET_CLAUDE_SPEND'){
+      claudeSpend={cycleStart:Core.claudeCycle(Date.now(),settings.claudeCycleDay).start,usd:0,requests:0};
+      await chrome.storage.local.set({claudeSpend});await broadcastConfig();
+      return {ok:true,...claudeSpendSummary()};
+    }
     return {ok:false,error:'未知操作。'};
   })().then(respond).catch(()=>respond({ok:false,error:'扩展操作失败，请重新加载扩展。'}));
   return true;
@@ -1253,9 +1574,14 @@ chrome.alarms?.onAlarm.addListener(alarm=>{
   if(alarm.name===HISTORY_ALARM){
     void ready.then(()=>history.prune()).then(()=>notifyHistoryChanged()).catch(()=>{});
     void ready.then(()=>pruneStoredAPIDiagnostics()).catch(()=>{});
+    void ready.then(()=>pruneStoredCache()).catch(()=>{});
   }
 });
 chrome.runtime.onStartup?.addListener(()=>{void ready.then(()=>oauthReady).catch(()=>{});});
+void ready.then(()=>settleOnboarding()).catch(()=>{});
+chrome.runtime.onInstalled?.addListener(details=>{
+  if(['install','update'].includes(details?.reason))void ready.then(()=>startOnboarding(details.reason)).catch(()=>{});
+});
 chrome.permissions?.onRemoved?.addListener(removed=>{
   if(!removed.origins?.includes('http://127.0.0.1/*'))return;
   void ready.then(async()=>{
@@ -1265,7 +1591,7 @@ chrome.permissions?.onRemoved?.addListener(removed=>{
   }).catch(()=>{});
 });
 chrome.tabs.onRemoved.addListener(tabId=>{
-  ready.then(async()=>{delete quotas[tabId];delete railStates[tabId];await Promise.all([persistQuotas(),persistRailStates()]);});
+  ready.then(async()=>{delete quotas[tabId];delete railStates[tabId];setLayoutState(tabId,null);await Promise.all([persistQuotas(),persistRailStates()]);});
   for(const client of clients) if(client.tabId===tabId) cancelClient(client);
 });
 chrome.tabs.onUpdated?.addListener((tabId,change,tab)=>{

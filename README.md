@@ -1,5 +1,7 @@
 # SuperX
 
+> **New in this fork: a Claude API Key connection** that fact-checks with your own Claude API credit, such as the monthly credit included with Claude Max. It defaults to Haiku 5.5 (Auto routing is opt-in), checks only when you click and stops at a per-cycle spending limit. See [the Claude section of the connection guide](docs/CONNECTIONS.md#claude-api-key).
+
 **Understand X. Fact-check as you scroll.**
 
 [Download 1.1.6](https://github.com/bwjoke/SuperX/releases/download/v1.1.6/SuperX.zip) · [Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo) · [Release notes](https://github.com/bwjoke/SuperX/releases/tag/v1.1.6) · [Website](https://superx.vip/) · [Support](https://github.com/bwjoke/SuperX/issues) · [简体中文](README.zh-CN.md) · [Privacy](PRIVACY.md)
@@ -44,6 +46,8 @@ The [acceptance record](docs/RELEASE_CHECKLIST.md) distinguishes automated check
 
 **New in 1.1.6:** stable timeline position when returning from a post detail, with aligned and evenly spaced SuperX controls on both X layouts, including Subscribe/Follow headers.
 
+New installations open a three-step setup guide (connection, sign-in or Key, when to fact-check) and start in **Only when I click**: nothing is sent until you press the SuperX button on a post. Choose **Automatically** there or later in Settings; reopen the guide from **Setup guide** in the Settings sidebar or the popup. Updating never changes existing trigger choices; an existing installation that was never connected sees the guide once.
+
 The popup and Settings share Automatic / Custom / Pause choices. Custom can combine the post-header SuperX button, button hover, whole-post hover, automatic detail-post checks and automatic reply checks. The button, both one-second hover rules and detail-post checks start enabled; automatic reply checks start disabled. Existing choices are retained. Cached answers appear in every mode without a new model request. Hover starts an unchecked post; click again to explicitly recheck. Switching modes keeps accepted answers running.
 
 In Custom mode, the popup shows a compact summary of the five saved trigger states and hover delays. Change these conditions in Settings; switching modes retains your choices.
@@ -71,7 +75,7 @@ Requirements: desktop Chrome or Chromium-based Edge 120+, and provider access to
 Install version 1.1.5 from the Chrome Web Store for Chrome-managed updates:
 
 1. Open [SuperX in the Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo) and choose **Add to Chrome**.
-2. Open **Settings → Connection**. New installations default to **Sign in · The X Subscription**: choose **Sign in to Grok** and approve the short code on the official page. You can instead configure **Grok API Key** or **Grok Build · Local CLI / ACP**. Each initially selects **Grok 4.3 / None**. Save settings, enable SuperX and open X.
+2. Follow the setup guide that opens after installation. It recommends **Sign in with Grok**: approve the short code on the official page. You can instead paste a Grok or Claude API Key, or open the advanced guide for **Grok Build · Local CLI / ACP**. Each connection initially selects **Grok 4.3 / None** (Claude: Haiku 5.5). Then choose **Only when I click** (the default) or **Automatically** and open X. Skipping the guide leads to **Settings → Connection**.
 3. Chrome manages extension updates. If replacing an unpacked installation, disable the old copy first to avoid duplicate analysis and configure the store copy separately.
 
 For Edge or a manual GitHub installation:
@@ -103,11 +107,11 @@ Both sources use **Settings → Connection → Grok API Key**; no separate Key-s
 
 Eligible API use from The X Subscription shares the plan's weekly allowance. Alternatively, create a Key and add pay-as-you-go credits in [xAI Console](https://console.x.ai/), with token and tool charges managed there. Buying standard API credits does not enable faster processing automatically. [Priority Processing](https://docs.x.ai/developers/advanced-api-usage/priority-processing) is separately priced and requires explicit opt-in; SuperX currently sends standard requests. Priority may reduce latency during demand peaks but does not guarantee availability. See [Privacy](PRIVACY.md) for the data sent and the provider's handling.
 
-**Remember Key on this device** is checked on first setup. It encrypts the Key automatically in this browser profile and restores it after browser restart, with no password or unlock step. Uncheck Remember Key and save to remove the encrypted record and local encryption key, keeping your API Key only for the current browser session. Browser sync is not used. **Clear saved Key** removes the encrypted record, encryption key, obsolete Key records, session credential and cache, while keeping your remember preference.
+**Remember Key on this device** is checked on first setup. It encrypts the Key automatically in this browser profile and restores it after browser restart, with no password or unlock step. Uncheck Remember Key and save to remove the encrypted record and local encryption key, keeping your API Key only for the current browser session. Browser sync is not used. **Clear saved Key** removes the encrypted record, encryption key, obsolete Key records, session credential and saved answers, while keeping your remember preference.
 
 Existing plaintext Keys and usable session Keys from older versions migrate automatically when Remember Key is selected; plaintext records are removed after the encrypted save succeeds. Missing or damaged saved data requires entering the API Key once again. Older password-encrypted records are not decrypted and remain only until successful migration, replacement or clearing. Automatic encryption protects against exposure of the stored ciphertext alone; it does not protect against access to the full browser profile or a compromised device. See [Privacy](PRIVACY.md) for storage details.
 
-In API mode, requests go directly from the extension's background worker to `api.x.ai`; the project does not operate a relay server. The Key is not passed to the X page's content script. Analysis uses your Key when SuperX is enabled. Clearing or replacing the Key cancels queued and active requests and clears the session cache; already sent work may still be billed. Read [Privacy](PRIVACY.md), especially on pages that show non-public posts.
+In API mode, requests go directly from the extension's background worker to `api.x.ai`; the project does not operate a relay server. The Key is not passed to the X page's content script. Analysis uses your Key when SuperX is enabled. Clearing or replacing the Key cancels queued and active requests and clears saved answers; already sent work may still be billed. Read [Privacy](PRIVACY.md), especially on pages that show non-public posts.
 
 ## Settings and behavior
 
@@ -135,7 +139,7 @@ There is no extension-level post-count limit or spending cap. More tabs, search 
 
 The per-post Token display uses provider-reported usage for the current fact check and comments. Hover it for model and stage details. It does not total earlier reanalyses or all account spending. Cached results show their original usage and that no new usage was incurred for that cache hit; partial or missing statistics are marked rather than estimated.
 
-Completed results are reusable for up to 24 hours within the current browser session, with a limit of 160 entries and approximately 4 MB. Cache identity includes the connection source, OAuth authorization identity where applicable, post, model, reasoning effort, answer language, search options, generation flow and effective prompts. Switching sources or signing into another OAuth account does not reuse the previous source/account's generated answers or comments, including generated history views; locally recorded post visits remain available. Cached results use trusted session storage and are removed when the browser session ends or credentials change. Old persistent caches are removed on upgrade. Expired entries are pruned when the worker starts and when new entries are saved; the 24 hours is a reuse limit, not an exact-time deletion timer within an open session. **Clear cache** removes the session cache. See [Privacy](PRIVACY.md) for what entries contain.
+Completed results are reused instead of a new request, so a reused answer costs nothing. By default they are kept for 1 day on this device in restricted local extension storage, so they survive a browser restart, with a limit of 120 entries and approximately 2 MB. **Settings › Maintenance › Answer cache** offers 7 days, or **Until the browser closes**, which keeps nothing on disk (160 entries, approximately 4 MB, in session storage). With browsing history off, answers are always kept only until the browser closes. The period runs from when an answer was made, not from its last use; cached answers an hour old or more show their age, and **Reanalyze** always fetches a fresh one. Cache identity includes the connection source, OAuth authorization identity where applicable, post, model, reasoning effort, answer language, search options, generation flow and effective prompts. Switching sources or signing into another OAuth account does not reuse the previous source/account's generated answers or comments, including generated history views; locally recorded post visits remain available. Signing out or changing credentials removes the affected answers from disk. Expired entries are pruned when the worker starts, when new entries are saved and hourly, so they leave disk within about an hour. **Clear answer cache** removes every saved answer. Maintenance also shows how many answers were reused and about how much that saved (dollars for API Key and Claude, tokens otherwise); the count is kept until **Reset count**. There is no shared cache between users; that would require a SuperX server, which SuperX does not operate. See [Privacy](PRIVACY.md) for what entries contain.
 
 ## Browsing history
 
@@ -145,7 +149,7 @@ The history stores the displayed post text, author, URL, language, viewing times
 
 Search posts, authors and saved answers; remove individual entries or use **Clear history** to delete everything saved there. Turn off **Save browsing history** to stop new records and answer updates without deleting existing entries. Expired records are excluded from history views and pruned on startup, history reads/writes and an hourly background alarm. Browser shutdown, scheduling delays or storage errors can delay physical cleanup; there is no exact-time deletion guarantee.
 
-History is separate from the API result cache: **Clear cache**, clearing/replacing the API Key and ending the browser session do not delete it. **Clear history** does not delete the Key or result cache, and does not erase an answer already displayed in X. Viewing history never automatically resumes analysis. Private or protected posts can be retained if they were visible on a supported page; see [Privacy](PRIVACY.md).
+History is separate from the answer cache: **Clear answer cache**, clearing/replacing the API Key and ending the browser session do not delete it. **Clear history** does not delete the Key or saved answers, and does not erase an answer already displayed in X. Viewing history never automatically resumes analysis. Private or protected posts can be retained if they were visible on a supported page; see [Privacy](PRIVACY.md).
 
 ## Future direction
 
@@ -163,6 +167,7 @@ History is separate from the API result cache: **Clear cache**, clearing/replaci
 | OAuth login expired or refresh uncertain | Sign in again in Settings; no saved API Key is substituted. Only approve the short code on the official authorization page |
 | Model list cannot load while connected | Read the specific warning and use the official usage link to check your account. An unavailable list alone does not prove that your allowance is exhausted; the last successful list is retained when available |
 | Unusual sidebar layout | Reload the extension and refresh X; report the page type, browser version and a redacted screenshot |
+| "SuperX can't read this X layout" | X changed how it shows posts or their action bars. Use **Report issue** to open a pre-filled GitHub issue with no page content. **Dismiss** hides the notice for both failure types until the next SuperX version; the popup line stays while the tab is affected |
 
 An answer with sources is not a guarantee of correctness. An incomplete fact check does not certify the post. Partial findings stay labelled incomplete during retries and after exhaustion; retry manually when appropriate.
 

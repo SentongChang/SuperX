@@ -216,7 +216,7 @@ test('composer context usernames use only an unambiguous owned header and matchi
 test('composer context marks real Show more and line-clamp truncation independently of missing permalinks',()=>{
   const linked=e('article',{},[header('parent','123'),tweetText('Visible excerpt.'),e('button',{'data-testid':'tweet-text-show-more-link'},[],'Show more')]);
   assert.equal(core.extractPostContext(linked).textTruncated,true);assert.equal(core.extractPostContext(linked).snapshotOnly,undefined);
-  assert.equal(core.extractPost(linked).textTruncated,undefined,'The existing feed result shape is unchanged');
+  assert.equal(core.extractPost(linked).textTruncated,true,'The checked post reports its own Show more for the text gap');
   const text=tweetText('Clamped excerpt.');text.attrs.style='display:-webkit-box;-webkit-line-clamp:2';text.clientHeight=40;text.scrollHeight=80;
   const preview=e('button',{},[e('div',{'data-testid':'User-Name'},[],'@name'),text]);
   assert.equal(core.extractPostContext(preview).textTruncated,true);assert.equal(core.extractPostContext(preview).snapshotOnly,true);
@@ -602,6 +602,79 @@ test('inline links in post text are not treated as quoted containers', () => {
   assert.match(result.text, /Claim with/);
   assert.match(result.text, /source/);
   assert.deepEqual(result.quotedContext, []);
+});
+
+test('the checked post lists its own outbound links, never mentions, hashtags or cashtags', () => {
+  const link = (href, text) => e('a', { href }, [], text);
+  const text = e('div', { 'data-testid': 'tweetText' }, [
+    link('/someone', '@someone'), link('/hashtag/claims', '#claims'), link('/search?q=%24TSLA&src=cashtag_click', '$TSLA'),
+    link('https://t.co/AAA', 'https://example.com/a/b…'), link('https://t.co/BBB', 'example.org/report…'),
+    link('https://t.co/CCC', 'https://example.com/a/b'), link('https://t.co/DDD', 'https://news.example/1#top'),
+    link('/other/status/55', 'x.com/other/status/55'), link('https://t.co/EEE', 'https://fifth.example/')
+  ], 'Claim ');
+  const result = core.extractPost(e('article', {}, [header('author', '10'), text]));
+  // Expanded text wins when it parses; otherwise the t.co address is kept.
+  // Duplicates collapse, fragments are dropped and at most four are listed.
+  assert.deepEqual(result.links, [{ url: 'https://example.com/a/b' }, { url: 'https://t.co/BBB' }, { url: 'https://news.example/1' },
+    { url: 'https://x.com/other/status/55' }]);
+  // An unexpanded t.co address is context only: Claude never opens X's redirect.
+  assert.deepEqual(core.fetchableLinks(result), ['https://example.com/a/b', 'https://news.example/1']);
+  assert.equal(Object.hasOwn(core.extractPost(e('article', {}, [header('author', '11'), tweetText('No links.')])), 'links'), false);
+});
+
+test('a link card becomes a titled link, not a quoted post, and a real quote still does', () => {
+  const card = e('div', { 'data-testid': 'card.wrapper' }, [e('a', { href: 'https://t.co/CARD' }, [
+    e('span', {}, [], 'example.com'), e('span', {}, [], 'Official report'), e('span', {}, [], 'Figures for 2026'), e('span', {}, [], 'More')])]);
+  const body = e('div', { 'data-testid': 'tweetText' }, [e('a', { href: 'https://t.co/CARD' }, [], 'https://example.com/report…')], 'See ');
+  const quote = e('div', { 'data-testid': 'quoteTweet' }, [header('quoted', '21'), tweetText('Quoted claim.'),
+    e('div', { 'data-testid': 'card.wrapper' }, [e('a', { href: 'https://t.co/INNER' }, [], 'inner.example')])]);
+  const result = core.extractPost(e('article', {}, [header('author', '20'), body, card, quote]));
+  assert.deepEqual(result.links, [{ url: 'https://example.com/report', title: 'example.com · Official report · Figures for 2026' }]);
+  assert.deepEqual(result.quotedContext.map(item => item.id), ['21']);
+});
+
+test('only a visible Community Note on the checked post itself is captured', () => {
+  const note = (attrs = {}) => e('div', { 'data-testid': 'birdwatch-pivot', ...attrs }, [
+    e('span', {}, [], 'Readers added context: the figure is from 2019. ' + 'x'.repeat(1600)),
+    e('a', { href: 'https://t.co/N1' }, [], 'https://stats.example/2019…'), e('a', { href: '/i/birdwatch/n/1' }, [], 'Rate it'),
+    e('a', { href: 'https://t.co/N2' }, [], 'second.example'), e('a', { href: 'https://t.co/N3' }, [], 'third.example')]);
+  const own = core.extractPost(e('article', {}, [header('author', '30'), tweetText('Claim.'), note()]));
+  assert.equal(own.communityNote.text.length, 1500); assert.match(own.communityNote.text, /^Readers added context/);
+  assert.deepEqual(own.communityNote.links, [{ url: 'https://stats.example/2019' }, { url: 'https://t.co/N2' }]);
+  const hidden = core.extractPost(e('article', {}, [header('author', '31'), tweetText('Claim.'), note({ style: 'display: none' })]));
+  assert.equal(Object.hasOwn(hidden, 'communityNote'), false);
+  const quoted = core.extractPost(e('article', {}, [header('author', '32'), tweetText('Claim.'),
+    e('div', { 'data-testid': 'quoteTweet' }, [header('quoted', '33'), tweetText('Quoted.'), note()])]));
+  assert.equal(Object.hasOwn(quoted, 'communityNote'), false);
+});
+
+test('link URLs must be absolute web addresses without credentials, ports or fragments', () => {
+  assert.equal(core.linkURL('https://example.com/a?b=1#frag'), 'https://example.com/a?b=1');
+  for (const value of ['javascript:alert(1)', 'data:text/html,hi', 'https://user:pass@example.com/', 'https://example.com:8443/',
+    'ftp://example.com/', '/relative', 'https://localhost/', 'https://example.com/' + 'a'.repeat(2048), 42, null])
+    assert.equal(core.linkURL(value), null, String(value).slice(0, 40));
+});
+
+test('the links gap needs a reported fetch with nothing opened and a post with links Claude may open', () => {
+  const settings = { provider: 'claude' }, post = { links: [{ url: 'https://example.com/a' }], images: [] };
+  const gaps = (value, webFetch, verdict = 'mixed') => core.checkGaps({ post: value, settings, searched: true, webFetch, verdict });
+  assert.deepEqual(gaps(post, { attempted: 2, succeeded: 0 }), ['links']);
+  assert.deepEqual(gaps(post, { attempted: 0, succeeded: 0 }), ['links']);
+  assert.deepEqual(gaps(post, { attempted: 2, succeeded: 1 }), []);
+  assert.deepEqual(gaps(post, undefined), [], 'Connections that read X themselves report no fetch');
+  assert.deepEqual(gaps(post, { attempted: 0, succeeded: 0 }, 'none'), []);
+  assert.deepEqual(gaps({ links: [{ url: 'https://x.com/a/status/1' }], images: [] }, { attempted: 0, succeeded: 0 }), []);
+  assert.deepEqual(gaps({ images: [], communityNote: { text: 'Note.', links: [{ url: 'https://stats.example/' }] } }, { attempted: 0, succeeded: 0 }), ['links']);
+  // Only the extension observes links, so the model's marker never lists it.
+  assert.equal(core.formatVerdictLine('mixed', ['links', 'text']), 'VERDICT: MIXED; LIMITS: TEXT');
+});
+
+test('the Claude context key changes with links, a Community Note or truncation', () => {
+  const post = { id: '1', url: 'https://x.com/a/status/1' };
+  const keys = [post, { ...post, links: [{ url: 'https://example.com/' }] }, { ...post, communityNote: { text: 'Context.', links: [] } },
+    { ...post, textTruncated: true }].map(core.claudeContextKey);
+  assert.equal(new Set(keys).size, 4);
+  assert.equal(core.claudeContextKey({ ...post, links: [{ url: 'https://example.com/', title: 'Changed title' }] }), keys[1]);
 });
 
 test('fingerprints change for edited text, media, or quoted evidence', () => {
@@ -1197,6 +1270,7 @@ test('Settings history is a direct page link and popup still opens history witho
   await settleUI();await settleUI();
   assert.equal(settings.ids.has('history-enabled'),false);assert.equal(settings.ids.has('open-history'),false);
   assert.match(fs.readFileSync(path.join(__dirname,'../extension/options.html'),'utf8'),/<a href="history.html"[^>]*data-i18n="common.history"/);
+  assert.match(fs.readFileSync(path.join(__dirname,'../extension/options.html'),'utf8'),/<a href="onboarding.html" class="sidebar-page-link" data-i18n="onboarding.reopen">/);
   assert.equal(settings.messages.some(message=>['GET_HISTORY_STATUS','SET_HISTORY_ENABLED'].includes(message.type)),false);
   const fixture=uiPageFixture('popup',API_UI_SETTINGS,{session:{apiKey:undefined}});
   await settleUI();await settleUI();
@@ -2275,7 +2349,7 @@ test('direct-client and security labels are supplied distinctly in twelve langua
     assert.ok(Object.keys(ui.catalog[locale]).every(key=>!key.toLowerCase().includes('consent')),locale);
     assert.ok(Object.values(ui.catalog[locale]).every(value=>!value.includes('ZDR')),locale);
   }
-  assert.match(ui.t('options.cacheHelp','en'),/keeping browsing history/);
+  assert.match(ui.t('options.cacheHelp','en'),/without deleting browsing history/);
 });
 
 test('provider switching preserves credential drafts and Build saves without sending a Key',async()=>{
@@ -2732,4 +2806,121 @@ test('account-limit reasons require explicit provider evidence and retain ambigu
   for(const [providerCode,expected] of cases)assert.equal(core.accountLimitReason({providerCode}),expected);
   assert.equal(core.accountLimitReason({httpStatus:429}),'limited');
   for(const value of [undefined,null,{}, {httpStatus:403},{httpStatus:402},{providerCode:'private-team:spending_limit'},{providerCode:'quota is exhausted'},{reason:'credits'}])assert.equal(core.accountLimitReason(value),'');
+});
+
+test('only the checked post\'s own Show more marks it truncated, and the flag never changes its fingerprint',()=>{
+  const showMore=()=>e('button',{'data-testid':'tweet-text-show-more-link'},[],'Show more');
+  const quoteLink=e('div',{role:'link'},[header('quoted','804'),tweetText('Quoted excerpt.'),showMore()]);
+  const quoted=core.extractPost(e('article',{'data-testid':'tweet'},[header('main','803'),tweetText('Main claim.'),quoteLink]));
+  assert.equal(quoted.textTruncated,undefined);assert.equal(quoted.quotedContext[0].textTruncated,true);
+  const main=core.extractPost(e('article',{'data-testid':'tweet'},[header('main','803'),tweetText('Main claim.'),showMore()]));
+  assert.equal(main.textTruncated,true);
+  const {textTruncated,...expanded}=main;
+  assert.equal(core.postFingerprint(main),core.postFingerprint(expanded));
+});
+
+test('answer cache retention defaults to 1 day on disk, accepts only its three periods and falls back to session without history',()=>{
+  assert.equal(core.normalizeSettings({}).answerCacheRetention,'1d');
+  for(const value of ['session','1d','7d'])assert.equal(core.normalizeSettings({answerCacheRetention:value}).answerCacheRetention,value);
+  for(const value of ['3d','forever',2,null,'toString'])assert.equal(core.normalizeSettings({answerCacheRetention:value}).answerCacheRetention,'1d',String(value));
+  const day=24*60*60*1000;
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'session'})},{ttlMs:day,area:'session',maxEntries:160,maxBytes:4_000_000});
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'1d'})},{ttlMs:day,area:'local',maxEntries:120,maxBytes:2_000_000});
+  assert.deepEqual({...core.cacheRetention({answerCacheRetention:'7d'})},{ttlMs:7*day,area:'local',maxEntries:120,maxBytes:2_000_000});
+  assert.equal(core.cacheRetention({answerCacheRetention:'7d'},false),core.CACHE_RETENTIONS.session);
+  assert.equal(core.cacheRetention(undefined),core.CACHE_RETENTIONS['1d']);
+});
+
+const healthyProbe={route:'home',signedOut:false,evidence:5,readable:5,withControls:5};
+const brokenProbe={route:'home',signedOut:false,evidence:5,readable:0,withControls:0};
+test('layout failures need positive evidence on a signed-in post-list page',()=>{
+  assert.equal(core.layoutFailure(brokenProbe),'posts');
+  assert.equal(core.layoutFailure({...brokenProbe,evidence:2}),null,'Fewer than three permalinks is too little evidence');
+  assert.equal(core.layoutFailure({...brokenProbe,route:'other'}),null);
+  assert.equal(core.layoutFailure({...brokenProbe,signedOut:true}),null);
+  assert.equal(core.layoutFailure({...brokenProbe,evidence:0}),null,'An empty or loading page is never a failure');
+  const noButtons={...healthyProbe,withControls:0};
+  assert.equal(core.layoutFailure(noButtons),null,'A post button the user does not use is not reported');
+  assert.equal(core.layoutFailure(noButtons,{postButton:true}),'actions');
+  assert.equal(core.layoutFailure({...noButtons,readable:2},{postButton:true}),null);
+  assert.equal(core.layoutFailure({...healthyProbe,withControls:1},{postButton:true}),null);
+});
+
+test('a layout failure shows only after the page settles and repeats, and clears after two healthy probes',()=>{
+  const {probeMs,settleMs}=core.LAYOUT_HEALTH;
+  const step=(state,probe,at,extra={})=>core.layoutHealthStep(state,{page:'/home',probe,...extra},at);
+  let state=null,at=0;
+  for(let index=0;index<5;index++){state=step(state,brokenProbe,at);at+=1000;}
+  assert.equal(state.code,null,'Five quick failures inside the settle time are not enough');
+  state=step(state,brokenProbe,settleMs);assert.equal(state.code,'posts');
+  assert.deepEqual(core.layoutReport({...state.probe,code:state.code}),{code:'posts',route:'home',evidence:5,readable:0,withControls:0,language:''});
+
+  state=null;
+  for(let index=0;index<3;index++)state=step(state,brokenProbe,index*probeMs);
+  assert.equal(state.code,null,'Three probes 2.5 s apart are still inside the settle time');
+  state=step(state,brokenProbe,settleMs);assert.equal(state.code,'posts');
+  state=step(state,{...healthyProbe,evidence:0,readable:0},settleMs+probeMs);assert.equal(state.code,'posts','A loading probe keeps the notice');
+  state=step(state,healthyProbe,settleMs+2*probeMs);assert.equal(state.code,'posts');
+  state=step(state,healthyProbe,settleMs+3*probeMs);assert.equal(state.code,null);
+  assert.equal(state.probe,null);
+});
+
+test('layout health restarts its streak on a changed failure or interruption, and resets on a new page',()=>{
+  const {settleMs}=core.LAYOUT_HEALTH,broken=(state,at,probe=brokenProbe,page='/home')=>core.layoutHealthStep(state,{page,probe,postButton:true},at);
+  let state=broken(null,0);state=broken(state,settleMs);
+  state=broken(state,settleMs+1,{...healthyProbe,withControls:0});
+  assert.equal(state.failStreak,1);assert.equal(state.candidate,'actions');
+  state=broken(state,settleMs+2,{...healthyProbe,evidence:1,readable:0});
+  assert.equal(state.failStreak,0,'An inconclusive probe breaks the streak');
+  for(let index=0;index<3;index++)state=broken(state,settleMs+3+index);
+  assert.equal(state.code,'posts');
+  state=broken(state,settleMs+10,{...brokenProbe,route:'other'});assert.equal(state.code,'posts','A skipped probe on the same page keeps the notice');
+  state=broken(state,settleMs+11,brokenProbe,'/explore');
+  assert.equal(state.code,null);assert.equal(state.since,settleMs+11);assert.equal(state.page,'/explore');
+});
+
+test('layout reports keep only allow-listed diagnostic fields',()=>{
+  const report=core.layoutReport({code:'actions',route:'status',evidence:900,readable:-3,withControls:1.5,language:'pt-BR',url:'https://x.com/Writer/status/1',text:'Claim'});
+  assert.deepEqual(report,{code:'actions',route:'status',evidence:50,readable:0,withControls:0,language:'pt-BR'});
+  assert.equal(core.layoutReport({code:'composer',route:'home'}),null);
+  assert.equal(core.layoutReport({code:'posts',route:'messages'}),null);
+  assert.equal(core.layoutReport({code:'posts',route:'home',language:'<script>'}).language,'');
+});
+
+test('the layout issue link targets the repository issue tracker and carries no page content',()=>{
+  const pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8'));
+  assert.equal(core.ISSUES_URL,pkg.bugs.url);
+  const href=core.layoutIssueURL({code:'posts',route:'status',evidence:4,readable:0,withControls:0,language:'en',url:'https://x.com/Writer/status/8000000000000000100',handle:'Writer',text:'Claim text'},
+    {version:'1.1.6',userAgent:'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',now:Date.UTC(2026,10,22,23)});
+  const url=new URL(href);
+  assert.equal(url.origin+url.pathname,pkg.bugs.url+'/new');
+  assert.equal(url.searchParams.get('title'),'X layout not readable: posts');
+  assert.equal(url.searchParams.get('body'),['No page content is included.','','SuperX version: 1.1.6','Browser: Edge 131','Page: status','Failure: posts',
+    'Post links found: 4','Posts recognised: 0','Posts with an action bar: 0','X language: en','Date: 2026-11-22'].join('\n'));
+  assert.doesNotMatch(href,/Writer|8000000000000000100|Claim|x\.com/);
+  const chrome=new URL(core.layoutIssueURL({code:'actions',route:'home'},{version:'<b>',userAgent:'Chrome/130.1',now:0})).searchParams.get('body');
+  assert.match(chrome,/SuperX version: unknown\nBrowser: Chrome 130\n/);assert.match(chrome,/X language: unknown/);
+  assert.equal(core.layoutIssueURL({code:'posts',route:'other'},{version:'1',userAgent:'',now:0}),'');
+});
+
+test('click-only triggers are the post button alone and match the Claude manual set',()=>{
+  const booleans=Object.fromEntries(Object.entries(core.DEFAULT_CUSTOM_TRIGGERS).filter(([,value])=>typeof value==='boolean').map(([key])=>[key,core.effectiveTriggerSettings({provider:'claude'}).customTriggers[key]]));
+  assert.deepEqual(booleans,{...core.CLICK_ONLY_TRIGGERS});assert.equal(Object.isFrozen(core.CLICK_ONLY_TRIGGERS),true);
+  const clickOnly=core.normalizeSettings({triggerMode:'custom',customTriggers:{...core.DEFAULT_CUSTOM_TRIGGERS,...core.CLICK_ONLY_TRIGGERS,postHoverMs:2500}});
+  assert.equal(core.clickOnlyTriggers(clickOnly),true);assert.equal(clickOnly.customTriggers.postHoverMs,2500,'hover waits are kept');
+  assert.equal(core.clickOnlyTriggers({...clickOnly,triggerMode:'automatic'}),false);
+  assert.equal(core.clickOnlyTriggers({...clickOnly,triggerMode:'paused'}),false);
+  assert.equal(core.clickOnlyTriggers(core.normalizeSettings({triggerMode:'custom'})),false,'the default custom set also hovers');
+  assert.equal(core.clickOnlyTriggers({...clickOnly,customTriggers:{...clickOnly.customTriggers,detailMain:true}}),false);
+  assert.equal(core.clickOnlyTriggers({...clickOnly,customTriggers:{...clickOnly.customTriggers,manual:false}}),false);
+});
+
+test('shared OAuth helpers keep only official device pages and map every error to a known key',()=>{
+  assert.equal(core.officialOAuthURL('https://accounts.x.ai/oauth2/device?user_code=AB-12'),'https://accounts.x.ai/oauth2/device?user_code=AB-12');
+  assert.equal(core.officialOAuthURL('https://auth.x.ai/oauth2/device/verify?client_id=c'),'https://auth.x.ai/oauth2/device/verify?client_id=c');
+  for(const value of ['https://accounts.x.ai.evil.example/oauth2/device','http://accounts.x.ai/oauth2/device','https://accounts.x.ai/oauth2/token','https://accounts.x.ai/oauth2/device?device_code=x','https://u:p@accounts.x.ai/oauth2/device','https://accounts.x.ai/oauth2/device#x','javascript:alert(1)',null,'https://accounts.x.ai/oauth2/device?'+'a'.repeat(2048)])
+    assert.equal(core.officialOAuthURL(value),'',String(value).slice(0,60));
+  assert.equal(core.oauthErrorKey('OAUTH_DEVICE_EXPIRED'),'oauth.expired');assert.equal(core.oauthErrorKey('OAUTH_CANCELLED'),'oauth.canceled');
+  assert.equal(core.oauthErrorKey('SOMETHING_NEW'),'oauth.unavailable');assert.equal(core.oauthErrorKey(undefined),'oauth.unavailable');
+  for(const code of ['OAUTH_ACCESS_DENIED','OAUTH_NETWORK_ERROR','OAUTH_STORAGE_ERROR','OAUTH_REAUTH_REQUIRED','OAUTH_LOGIN_REQUIRED','OAUTH_CATALOG_ERROR'])assert.ok(ui.catalog.en[core.oauthErrorKey(code)],code);
 });

@@ -8,7 +8,7 @@
   "minimum_chrome_version": "120",
   "permissions": ["storage", "alarms"],
   "optional_host_permissions": ["http://127.0.0.1/*"],
-  "host_permissions": ["https://x.com/*", "https://twitter.com/*", "https://api.x.ai/*", "https://auth.x.ai/*"],
+  "host_permissions": ["https://x.com/*", "https://twitter.com/*", "https://api.x.ai/*", "https://auth.x.ai/*", "https://api.anthropic.com/*"],
   "background": {"service_worker": "background.js"},
   "icons": {"16": "assets/icon-16.png", "32": "assets/icon-32.png", "48": "assets/icon-48.png", "128": "assets/icon-128.png"},
   "action": {"default_title": "SuperX", "default_popup": "popup.html", "default_icon": {"16": "assets/icon-16.png", "32": "assets/icon-32.png"}},
@@ -16,7 +16,7 @@
   "web_accessible_resources": [{"resources": ["assets/superx-symbol.svg"], "matches": ["https://x.com/*", "https://twitter.com/*"]}],
   "content_scripts": [{
     "matches": ["https://x.com/*", "https://twitter.com/*"],
-    "js": ["x-dom.js", "feed-core.js", "ui-i18n.js", "overlay-layout.js", "marked.umd.js", "markdown-renderer.js", "draft-composer.js", "content.js"],
+    "js": ["x-dom.js", "provider-registry.js", "source-quality.js", "feed-core.js", "ui-i18n.js", "overlay-layout.js", "marked.umd.js", "markdown-renderer.js", "draft-composer.js", "content.js"],
     "run_at": "document_idle"
   }]
 }

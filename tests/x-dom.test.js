@@ -336,3 +336,78 @@ test('a transparent retained page is excluded without treating an offscreen post
   visible.row.rect.top = -900; visible.row.rect.bottom = -600; documentWith(visible.row, faded.row);
   assert.deepEqual(DOM.articles(visible.row.parentElement), [visible.article]);
 });
+
+test('the checked modern post reports its own expander or clamp, never a clipped quote', () => {
+  const item = post('1'), nested = post('2', 'quote', 'Visible excerpt.');
+  nested.body.computed = {webkitLineClamp:'2'}; nested.body.clientHeight = 40; nested.body.scrollHeight = 80;
+  item.article.append(quote(nested)); documentWith(item.row);
+  assert.equal(DOM.mainTextTruncated(item.article), false);
+  const result = Core.extractPost(item.article);
+  assert.equal(result.textTruncated, undefined); assert.equal(result.quotedContext[0].textTruncated, true);
+  item.body.append(e('button', {type:'button', class:'max-w-full text-brand hover:underline'}, [], 'Show more'));
+  assert.equal(DOM.mainTextTruncated(item.article), true); assert.equal(Core.extractPost(item.article).textTruncated, true);
+});
+
+test('a modern post keeps the full address X hides inside a shortened link label', () => {
+  const item = post('1');
+  item.body.append(e('a', {href:'https://t.co/abc'}, [e('span', {'aria-hidden':'true'}, [], 'https://'), e('span', {}, [], 'example.com/a/b'),
+    e('span', {'aria-hidden':'true'}, [], '/c?id=2'), e('span', {'aria-hidden':'true'}, [], '…')]));
+  item.article.append(e('div', {'data-testid':'birdwatch-pivot'}, [e('span', {}, [], 'Readers added context.')]));
+  documentWith(item.row);
+  const result = Core.extractPost(item.article);
+  assert.deepEqual(result.links, [{url:'https://example.com/a/b/c?id=2'}]);
+  assert.deepEqual(result.communityNote, {text:'Readers added context.', links:[]});
+});
+
+test('layout self-check routes are an allow-list of post-list pages', () => {
+  for (const [path, kind] of [['/home', 'home'], ['/a/status/1', 'status'], ['/a', 'profile'], ['/a/with_replies', 'profile'],
+    ['/search?q=moon', 'search'], ['/search?q=moon&f=live', 'search'], ['/i/lists/1', 'list'], ['/i/bookmarks', 'bookmarks'], ['/home/', 'home']]) {
+    assert.equal(DOM.routeKind('https://x.com' + path), kind, path);
+  }
+  for (const path of ['/messages', '/settings', '/explore', '/notifications', '/a/media', '/i/flow/login', '/', '/a/status/1/photo/1', '/compose/post', '/login',
+    '/search?q=moon&f=media']) {
+    assert.equal(DOM.routeKind('https://x.com' + path), 'other', path);
+  }
+  assert.equal(DOM.routeKind('https://example.com/home'), 'other');
+});
+
+test('signed-out pages are recognised only by a visible sign-in control outside SuperX', () => {
+  const login = e('a', {href:'/login'}, [], 'Log in'), doc = documentWith(e('main', {}, [login]));
+  assert.equal(DOM.signedOut(doc), true);
+  login.computed = {display:'none'};
+  assert.equal(DOM.signedOut(doc), false);
+  assert.equal(DOM.signedOut(documentWith(e('superx-post-check', {}, [e('a', {href:'/i/flow/signup'})]))), false);
+  assert.equal(DOM.signedOut(documentWith(e('div', {'data-testid':'loginButton'}))), true);
+});
+
+test('layout probe counts readable posts and their action bars on the modern timeline', () => {
+  const items = ['100', '101', '102'].map(id => post(id));
+  const doc = documentWith(e('main', {}, [e('div', {id:'urt:home:for-you'}, [e('ul', {}, items.map(item => item.row))])]));
+  doc.location = {href:'https://x.com/home'};
+  assert.deepEqual(DOM.layoutProbe(doc), {route:'home', signedOut:false, evidence:3, readable:3, withControls:3});
+  for (const item of items) item.actions.children.length = 0;
+  assert.equal(DOM.layoutProbe(doc).withControls, 0);
+});
+
+test('layout probe finds post links SuperX cannot read, only in the main column', () => {
+  const items = ['100', '101', '102'].map(id => post(id));
+  for (const item of items) item.article.tagName = 'DIV';
+  const sidebar = e('aside', {}, [e('a', {href:'/trend/status/900'})]), nav = e('nav', {}, [e('a', {href:'/nav/status/901'})]);
+  const dialog = e('div', {role:'dialog'}, [e('a', {href:'/modal/status/902'})]), own = e('superx-post-check', {}, [e('a', {href:'/own/status/903'})]);
+  const doc = documentWith(e('main', {}, [...items.map(item => item.row), nav, dialog, own, e('a', {href:'/a/status/100/photo/1'})]), sidebar);
+  doc.location = {href:'https://x.com/home'};
+  assert.deepEqual(DOM.layoutProbe(doc), {route:'home', signedOut:false, evidence:3, readable:0, withControls:0});
+});
+
+test('layout probe ignores media and sub-page links, as on a thumbnail grid', () => {
+  const grid = ['200', '201', '202', '203'].flatMap(id => [e('a', {href:`/a/status/${id}/photo/1`}), e('a', {href:`https://x.com/a/status/${id}/video/1`})]);
+  const extras = [e('a', {href:'/a/status/204/analytics'}), e('a', {href:'/i/web/status/205'}), e('a', {href:'/a/status/206?s=20'})];
+  const doc = documentWith(e('main', {}, [...grid, ...extras])); doc.location = {href:'https://x.com/home'};
+  assert.equal(DOM.layoutProbe(doc).evidence, 1);
+});
+
+test('layout probe stops counting permalinks at fifty', () => {
+  const links = Array.from({length:80}, (_, index) => e('a', {href:`/a/status/${1000 + index}`}));
+  const doc = documentWith(e('main', {}, links)); doc.location = {href:'https://x.com/home'};
+  assert.equal(DOM.layoutProbe(doc).evidence, 50);
+});

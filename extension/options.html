@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SuperX · Settings</title>
     <link rel="stylesheet" href="options.css">
+    <script src="provider-registry.js" defer></script>
     <script src="feed-core.js" defer></script>
     <script src="ui-i18n.js" defer></script>
     <script src="options.js" defer></script>
@@ -21,6 +22,7 @@
           <a href="#prompts-heading" data-i18n="options.promptsTitle">Prompts</a>
           <a id="maintenance-link" href="#maintenance-heading" data-i18n="options.maintenance">Maintenance &amp; troubleshooting</a>
           <a href="history.html" class="sidebar-page-link" data-i18n="common.history">Browsing history</a>
+          <a href="onboarding.html" class="sidebar-page-link" data-i18n="onboarding.reopen">Setup guide</a>
         </nav>
       </aside>
       <main class="settings-main">
@@ -70,6 +72,7 @@
               <option value="oauth" data-i18n="options.providerOAuth">Sign in · The X Subscription</option>
               <option value="api" data-i18n="options.providerKey">Grok API Key</option>
               <option value="build" data-i18n="options.providerBuild">Grok Build · Local CLI / ACP</option>
+              <option value="claude" data-i18n="claude.provider">Claude API Key</option>
             </select>
           </div>
           <div id="api-fields">
@@ -158,6 +161,55 @@
               <select id="oauth-reasoning-effort" required aria-describedby="oauth-recommendation-help oauth-model-status"></select>
               <p id="oauth-recommendation-help" class="help" data-i18n="options.fastFactCheckHelp">Grok 4.3 with no reasoning suits feed browsing: usually faster, shorter answers with fewer Tokens.</p>
             </div>
+          </div>
+          <div id="claude-fields" hidden>
+            <p class="help" data-i18n="claude.intro">Uses your own Claude API Key and credit.</p>
+            <div class="field api-key-field">
+              <label for="claude-api-key" data-i18n="claude.keyLabel">Claude API Key</label>
+              <input id="claude-api-key" type="password" maxlength="500" data-i18n-placeholder="claude.keyPlaceholder" placeholder="Paste your Claude API Key (sk-ant-…)" autocomplete="off" spellcheck="false" dir="ltr" aria-describedby="claude-key-help claude-key-state">
+              <p id="claude-key-help" class="help" data-i18n="claude.keyHelp">Create the Key in Claude Console.</p>
+              <p class="help"><a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener noreferrer" data-i18n="claude.keyLink">Create a Key in Claude Console</a> · <a href="https://platform.claude.com/settings/billing" target="_blank" rel="noopener noreferrer" data-i18n="claude.billingLink">View Claude credit and usage</a></p>
+            </div>
+            <p id="claude-key-state" class="key-state" role="status" aria-live="polite"></p>
+            <div class="credential-actions"><button id="clear-claude-key" class="text-button" type="button" data-i18n="claude.clearKey" hidden>Clear Claude Key</button></div>
+            <div class="field model-field">
+              <label for="claude-model" data-i18n="claude.model">Claude model</label>
+              <select id="claude-model" required dir="ltr" aria-describedby="claude-model-help"></select>
+              <p id="claude-model-help" class="help" data-i18n="claude.modelHelp">Haiku 5.5 is the cheapest.</p>
+              <div class="field reasoning-field">
+                <label for="claude-effort" data-i18n="claude.effort">Thinking effort</label>
+                <select id="claude-effort" required>
+                  <option value="low" data-i18n="claude.effortLow">Low</option>
+                  <option value="medium" data-i18n="claude.effortMedium">Medium</option>
+                  <option value="high" data-i18n="claude.effortHigh">High</option>
+                </select>
+              </div>
+            </div>
+            <div class="field">
+              <label for="claude-max-searches" data-i18n="claude.maxSearches">Web searches per check (max)</label>
+              <input id="claude-max-searches" type="number" min="1" max="10" step="1" value="3" required aria-describedby="claude-max-searches-help">
+              <p id="claude-max-searches-help" class="help" data-i18n="claude.maxSearchesHelp">Each web search costs about $0.01.</p>
+            </div>
+            <div class="field">
+              <label for="claude-budget" data-i18n="claude.budget">Spending limit per cycle (USD)</label>
+              <input id="claude-budget" type="number" min="0" max="100000" step="1" value="100" required aria-describedby="claude-budget-help">
+              <p id="claude-budget-help" class="help" data-i18n="claude.budgetHelp">SuperX stops sending Claude requests once its estimate reaches this amount.</p>
+            </div>
+            <div class="field">
+              <label for="claude-cycle-day" data-i18n="claude.cycleDay">Cycle resets on day</label>
+              <input id="claude-cycle-day" type="number" min="1" max="28" step="1" value="15" required aria-describedby="claude-cycle-day-help">
+              <p id="claude-cycle-day-help" class="help" data-i18n="claude.cycleDayHelp">Use the day your monthly credit expires.</p>
+            </div>
+            <p id="claude-spend" class="key-state" role="status" aria-live="polite"></p>
+            <p class="help" data-i18n="claude.spendEstimate">Estimated from reported tokens and searches.</p>
+            <div class="credential-actions"><button id="reset-claude-spend" class="text-button" type="button" data-i18n="claude.resetSpend">Reset this cycle's counter</button></div>
+            <label class="checkbox-label"><input id="claude-auto-trigger" type="checkbox" aria-describedby="claude-auto-trigger-help"><span data-i18n="claude.autoTrigger">Also allow automatic checks</span></label>
+            <p id="claude-auto-trigger-help" class="help indented" data-i18n="claude.autoTriggerHelp">Off by default.</p>
+            <div id="claude-triage-field" class="indented nested-option" hidden>
+              <label class="checkbox-label"><input id="claude-triage" type="checkbox" aria-describedby="claude-triage-help"><span data-i18n="claude.triage">Pre-screen automatic checks</span></label>
+              <p id="claude-triage-help" class="help indented" data-i18n="claude.triageHelp">Haiku first decides whether a post makes a factual claim (under $0.001). Posts without one are not checked unless you click Check anyway.</p>
+            </div>
+            <p class="help" data-i18n="options.claude.xContext">Claude can't search X. SuperX passes along what's on your screen and lets Claude open the post's own links.</p>
           </div>
           <div id="api-concurrency-field" class="field concurrency-field">
             <label for="api-concurrency" data-i18n="options.concurrency">Maximum concurrent API requests</label>
@@ -297,12 +349,26 @@
           <details id="maintenance">
             <summary id="maintenance-heading" data-i18n="options.maintenance">Maintenance &amp; troubleshooting</summary>
             <div class="maintenance-content">
-        <div class="maintenance-action compact-section" aria-labelledby="cache-heading">
-          <div>
-            <h3 id="cache-heading" data-i18n="options.answerCache">Clear answer cache</h3>
-            <p class="section-description" data-i18n="options.cacheHelp">Clears cached answers without deleting browsing history. Refresh X or retry a post afterward.</p>
+        <div class="maintenance-action answer-cache" aria-labelledby="cache-heading">
+          <h3 id="cache-heading" data-i18n="options.answerCacheTitle">Answer cache</h3>
+          <div class="field">
+            <label for="cache-retention" data-i18n="options.cacheRetention">Keep answers for</label>
+            <select id="cache-retention" aria-describedby="cache-retention-help cache-history-off">
+              <option value="session" data-i18n="options.cacheRetentionSession">Until the browser closes</option>
+              <option value="1d" data-i18n="options.cacheRetention1d">1 day</option>
+              <option value="7d" data-i18n="options.cacheRetention7d">7 days</option>
+            </select>
+            <p id="cache-retention-help" class="help" data-i18n="options.cacheRetentionHelp">Reused answers cost nothing and appear instantly. They stay on this device, counted from when each answer was made. Use Recheck for a fresh answer.</p>
+            <p id="cache-history-off" class="help" data-i18n="options.cacheRetentionHistoryOff" hidden>Browsing history is off, so answers are kept only until the browser closes.</p>
           </div>
-          <button id="clear-cache" class="secondary-button" type="button" data-i18n="options.answerCache">Clear answer cache</button>
+          <div class="cache-stats">
+            <p id="cache-stats" class="help" aria-live="polite"></p>
+            <button id="cache-stats-reset" class="text-button" type="button" data-i18n="options.cacheStatsReset" hidden>Reset count</button>
+          </div>
+          <div class="compact-section cache-clear">
+            <p class="section-description" data-i18n="options.cacheHelp">Clears saved answers without deleting browsing history or the reuse count. Refresh X or recheck a post afterward.</p>
+            <button id="clear-cache" class="secondary-button" type="button" data-i18n="options.answerCache">Clear answer cache</button>
+          </div>
         </div>
 
         <div class="maintenance-action compact-section" aria-labelledby="reload-heading">

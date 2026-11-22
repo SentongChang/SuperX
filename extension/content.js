@@ -32,6 +32,7 @@
   let xUILanguage = UI.normalizeLanguage(document.documentElement.getAttribute('lang') || navigator.language || 'en');
   let uiLanguage = UI.resolveLanguage('auto',xUILanguage);
   const t = (key, vars) => UI.t(key, uiLanguage, vars);
+  const Sources = Core.Sources, authoredTitles = new WeakMap(), numberFormatters = new Map();
   let settings = Core.DEFAULT_SETTINGS, providerReady = false, connected = false, port, used = 0, collapsed = false;
   let lastPath = pageRouteKey(), scanTimer, reconnectTimer, handshakeTimer, dwellTimer, dwellDeadline=0, needsPageRefresh = false;
   let hasConfig=false,workerSleeping=false,awaitingConfig=false,reconnectFailures=0,xModalBlocked=false,pageSuspended=false;
@@ -40,6 +41,9 @@
   const hoverChecks=new Map();
   let hoverBlockedUntil=0;
   let triggerGuideCompleted=false,triggerGuideCompletionPending=false,triggerGuideDismissed=false,triggerGuideEntry=null;
+  // Layout self-check: the current page's health, the failure code the worker
+  // last heard about from this port, and the version whose notice was dismissed.
+  let layoutState=null,layoutReported='',layoutNoticeDismissed='';
   const triggerMode=()=>Core.triggerMode(settings);
   const triggerPageURL=()=>new URL(location.pathname,location.href).href;
   const explicitRequest=request=>request?.task==='analysis'&&['manual','recheck'].includes(request.triggerKind);
@@ -58,7 +62,8 @@
   // articles remain untouched.
   const overlay = document.createElement('grok-first-overlay');
   overlay.id = 'grokfirst-overlay';
-  overlay.dataset.version=chrome.runtime.getManifest?.()?.version||'development';
+  const extensionVersion=chrome.runtime.getManifest?.()?.version||'development';
+  overlay.dataset.version=extensionVersion;
   const overlayShadow = overlay.attachShadow({mode:'open'});
   const overlayStyle = document.createElement('style');
   const symbolURL=chrome.runtime.getURL('assets/superx-symbol.svg');
@@ -82,6 +87,11 @@
     .trigger-guide{position:absolute;z-index:4;box-sizing:border-box;width:248px;max-width:calc(100vw - 24px);padding:12px 32px 12px 14px;border:1px solid var(--gf-border,#2f3336);border-radius:12px;background:var(--gf-bg,#000);color:var(--gf-fg,#e7e9ea);box-shadow:0 4px 20px rgba(0,0,0,.2);font:400 13px/1.5 var(--gf-font,system-ui);pointer-events:none;}
     .trigger-guide[hidden]{display:none!important;}.trigger-guide::before{content:'';position:absolute;top:-5px;left:var(--guide-arrow,200px);width:8px;height:8px;background:inherit;border-top:1px solid var(--gf-border,#2f3336);border-left:1px solid var(--gf-border,#2f3336);transform:rotate(45deg);}
     .trigger-guide[data-placement=above]::before{top:auto;bottom:-5px;transform:rotate(225deg);}.guide-copy{position:relative;margin:0;overflow-wrap:anywhere;text-wrap:balance;}.guide-dismiss{position:absolute;top:5px;right:5px;display:grid;place-items:center;box-sizing:border-box;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--gf-muted,#71767b);cursor:pointer;pointer-events:auto;font:400 18px/1 var(--gf-font,system-ui);}.guide-dismiss:hover{background:rgba(127,127,127,.12);color:var(--gf-fg,#e7e9ea);}.guide-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:1px;}
+    .layout-notice{position:absolute;z-index:4;box-sizing:border-box;padding:12px 14px;border:1px solid var(--gf-border,#2f3336);border-radius:12px;background:var(--gf-bg,#000);color:var(--gf-fg,#e7e9ea);box-shadow:0 4px 20px rgba(0,0,0,.2);font:400 13px/18px var(--gf-font,system-ui);pointer-events:auto;}
+    .layout-notice[hidden]{display:none!important;}.layout-title{display:flex;align-items:flex-start;gap:8px;font:700 15px/20px var(--gf-font,system-ui);overflow-wrap:anywhere;}.layout-title svg{flex:none;width:16px;height:16px;margin-block-start:2px;color:var(--gf-muted,#71767b);}
+    .layout-body{margin:4px 0 0;padding-inline-start:24px;color:var(--gf-muted,#71767b);overflow-wrap:anywhere;}.layout-actions{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:10px;padding-inline-start:24px;}
+    .layout-report{color:var(--gf-accent,#1d9bf0);font-weight:700;text-decoration:none;}.layout-report:hover{text-decoration:underline;}.layout-dismiss{padding:0;border:0;background:transparent;color:var(--gf-muted,#71767b);font:inherit;cursor:pointer;}.layout-dismiss:hover{color:var(--gf-fg,#e7e9ea);}
+    .layout-report:focus-visible,.layout-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px;border-radius:2px;}
     grok-first-card{position:absolute;z-index:1;display:block;box-sizing:border-box;pointer-events:auto;overflow:hidden;}
     grok-first-card[hidden]{display:none!important;}
   `;
@@ -105,7 +115,17 @@
   triggerGuide.hidden=true;triggerGuide.setAttribute('role','status');triggerGuide.setAttribute('aria-live','polite');guideDismiss.type='button';
   guideDismiss.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();triggerGuideDismissed=true;hideTriggerGuide();});
   triggerGuide.append(guideCopy,guideDismiss);
-  railHeader.append(railLanguageControl,railHistory,railOptions,railCollapse);overlayShadow.append(rail,railHeader,railExpand,railSeparators,triggerGuide);
+  const layoutNotice=node('section','layout-notice'),layoutTitle=node('strong','layout-title'),layoutTitleText=node('span'),layoutBody=node('p','layout-body');
+  const layoutActions=node('div','layout-actions'),layoutReport=node('a','layout-report'),layoutDismiss=node('button','layout-dismiss');
+  layoutNotice.hidden=true;layoutNotice.setAttribute('role','status');layoutNotice.setAttribute('aria-live','polite');
+  layoutReport.target='_blank';layoutReport.rel='noopener noreferrer';layoutDismiss.type='button';
+  layoutDismiss.addEventListener('click',event=>{
+    event.preventDefault();event.stopPropagation();
+    layoutNoticeDismissed=extensionVersion;layoutNotice.hidden=true;scheduleLayout();
+    postControl({type:'DISMISS_LAYOUT_NOTICE'});
+  });
+  layoutTitle.append(infoIcon(),layoutTitleText);layoutActions.append(layoutReport,layoutDismiss);layoutNotice.append(layoutTitle,layoutBody,layoutActions);
+  railHeader.append(railLanguageControl,railHistory,railOptions,railCollapse);overlayShadow.append(rail,railHeader,railExpand,railSeparators,triggerGuide,layoutNotice);
   refreshHeaderLanguage();
   document.body.append(overlay);
   let layoutFrame = null, themeDirty = true, themeSignature = '', themePrimary = null;
@@ -159,6 +179,7 @@
   connect();
   scheduleScan();
   setInterval(tick,100);
+  setInterval(probeLayout,Core.LAYOUT_HEALTH.probeMs);
   // A message, rather than an idle open port, keeps the MV3 worker alive during generation.
   setInterval(()=>{if((requests.size||draftComposer?.activeCount) && connected)post({type:'PING'});},15000);
   document.addEventListener('visibilitychange',()=>{
@@ -285,9 +306,8 @@
     const limit=Core.accountLimitReason?.(diagnostic)||(['quota','credits','spending','rate','limited'].includes(diagnostic.reason)?diagnostic.reason:'');
     return limit?'account.'+limit:({auth:'oauth.catalogAuth',access:'oauth.catalogAccess',server:'oauth.catalogServer',network:'oauth.catalogNetwork',timeout:'oauth.catalogTimeout',response:'oauth.catalogResponse'})[diagnostic.reason]||'oauth.catalogConnected';
   }
-  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||['oauth.usageError','error.apiUsage','status.rateLimited'].includes(key));}
   function renderUsageLinks(target,provider) {
-    const links=[['account.viewUsage','https://grok.com/dashboard/usage'],...(provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])].map(([key,url])=>[t(key),url]);
+    const links=Core.providers.resolve(provider).usageLinks.map(([key,url])=>[t(key),url]);
     const signature=JSON.stringify(links);if(target.usageSignature===signature)return;target.usageSignature=signature;
     target.replaceChildren();
     for(const [label,url] of links){
@@ -295,7 +315,7 @@
     }
   }
   async function openSettings() {
-    const message={type:'OPEN_SETTINGS',focus:settings.provider==='oauth'?'oauth':settings.provider==='build'?'build':'api-key'};
+    const message={type:'OPEN_SETTINGS',focus:Core.providers.resolve(settings.provider).settingsFocus};
     // Settings can add or replace a Key. Restore the feed subscription so its
     // updated CONFIG can reach a tab that previously had no usable credential.
     if(workerSleeping)connect();
@@ -318,11 +338,12 @@
     railHeader.setAttribute('lang',uiLanguage);railHeader.setAttribute('dir',direction);
     rail.setAttribute('aria-label',t('aria.rail'));railLanguage.setAttribute('aria-label',t('aria.outputLanguage'));
     const auto=Array.from(railLanguage.children).find(option=>option.value==='auto');if(auto)auto.textContent=t('lang.auto').split(' · ')[0];railLanguage.title=t(settings.language==='auto'?'lang.auto':'aria.outputLanguage');
-    railOptions.setAttribute('aria-label',t('common.settings'));railOptions.title=t(needsPageRefresh?'status.refreshRequired':!providerReady?(settings.provider==='oauth'?'oauth.login':settings.provider==='build'?'popup.setupBuild':'common.enterKey'):'common.settings');
+    railOptions.setAttribute('aria-label',t('common.settings'));railOptions.title=t(needsPageRefresh?'status.refreshRequired':!providerReady?Core.providers.resolve(settings.provider).labels.setup:'common.settings');
     railHistory.setAttribute('aria-label',t('common.history'));railHistory.title=t('common.history');
     railCollapse.setAttribute('aria-label',t('common.collapse'));railCollapse.title=t('tooltip.collapse');
     railExpand.setAttribute('aria-label',t('common.expand'));railExpand.title=t('tooltip.expand');
-    railHeader.title=settings.provider==='oauth'?t('oauth.modeLabel',{count:settings.apiConcurrency}):settings.provider==='build'?t('popup.buildLabel',{transport:settings.buildTransport.toUpperCase()}):t('tooltip.apiMode',{count:settings.apiConcurrency});
+    renderLayoutNotice();
+    railHeader.title=t(Core.providers.resolve(settings.provider).labels.rail,{count:settings.apiConcurrency,transport:String(settings.buildTransport).toUpperCase()});
   }
   function syncUILanguage() {
     const observed=UI.normalizeLanguage(document.documentElement.getAttribute('lang') || navigator.language || 'en');
@@ -401,7 +422,7 @@
       entry.ui.diagnosticText.textContent='';entry.ui.diagnostics.hidden=true;entry.verificationDiagnostics=false;
     }
     const help=entry.ui.usageHelp;
-    if(help){help.hidden=!(isUsageIssue(entry.statusKey)||entry.commentStatus==='error'&&isUsageIssue(entry.commentError)||limit);if(!help.hidden)renderUsageLinks(help,settings.provider);}
+    if(help){help.hidden=!(Core.isUsageIssue(entry.statusKey)||entry.commentStatus==='error'&&Core.isUsageIssue(entry.commentError)||limit);if(!help.hidden)renderUsageLinks(help,settings.provider);}
   }
   function syncLoading(entry) {
     const active=['queued','running'].includes(entry.status);
@@ -415,42 +436,12 @@
     entry.ui.box.setAttribute('aria-busy',String(active||entry.status==='retry-wait'));
   }
   function errorKey(code,failure) {
-    if(code==='MODEL_UNSUPPORTED')return 'error.modelUnsupported';
-    if(code==='MEDIA_INPUT_LIMIT')return 'error.mediaLimit';
-    if(code==='API_IMAGE_INPUT')return 'error.apiImageInput';
-    if(code==='BUILD_IMAGE_UNSUPPORTED')return 'build.imageUnsupported';
-    if(code==='BUILD_IMAGE_UNAVAILABLE')return 'build.imageUnavailable';
-    if(code==='BUILD_IMAGE_LIMIT')return 'build.imageLimit';
     if(['OAUTH_MODEL_UNAVAILABLE','OAUTH_CATALOG_UNAVAILABLE'].includes(code)&&oauthState.catalogErrorCode)return catalogIssueKey(oauthState.catalogDiagnostics);
-    if(typeof code==='string'&&code.startsWith('OAUTH_'))return ({
-      OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',
-      OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_CANCELLED:'oauth.canceled',
-      OAUTH_MODEL_UNAVAILABLE:'oauth.modelUnavailable',OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError'
-    })[code]||'oauth.unavailable';
-    if(isCapacityFailure(code,failure))return 'error.apiCapacity';
-    if(code?.startsWith('BUILD_'))return ({BUILD_LOGIN_REQUIRED:'build.login',BUILD_CANCEL_UNCONFIRMED:'build.cancelUnconfirmed',BUILD_CONNECTION_REQUIRED:'build.codeRequired',BUILD_AUTH_FAILED:'build.codeInvalid',BUILD_UNAVAILABLE:'build.missing',BUILD_DISCONNECTED:'build.missing',BUILD_NATIVE_MISSING:'build.missing',BUILD_VERSION_UNSUPPORTED:'build.unsupported',BUILD_MODEL_UNSUPPORTED:'build.unsupported',BUILD_EFFORT_UNSUPPORTED:'build.unsupported'})[code]||'build.unavailable';
-    const limit=Core.accountLimitReason?.(failure)||(code==='RATE_LIMIT'||failure?.code==='RATE_LIMIT'?'limited':'');
-    if(limit)return 'account.'+limit;
-    const http=failure?.httpStatus,provider=Core.apiFailureProviderCode(failure?.providerCode);
-    if(code==='API_ERROR'){
-      if(http===401||['invalid_api_key','authentication_error','unauthenticated'].includes(provider))return settings.provider==='oauth'?'oauth.reauthRequired':'error.apiKeyRejected';
-      if(http===402||['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded'].includes(provider))return settings.provider==='oauth'?'oauth.usageError':'error.apiUsage';
-      if(http===403||['permission_error','permission_denied','forbidden'].includes(provider))return settings.provider==='oauth'?'oauth.permissionError':'error.apiAccess';
-      if(http===429||failure?.code==='RATE_LIMIT')return 'status.rateLimited';
-      if(failure?.code==='CONNECTION')return 'error.apiConnection';
-      if(http>=500||failure?.code==='SERVER')return 'error.apiServer';
-      if(http>=400&&http<500||failure?.code==='ACCESS')return 'error.apiRequest';
-      return 'error.apiFailed';
-    }
-    if(['API_STREAM_INTERRUPTED','API_STREAM_ERROR'].includes(code))return 'error.apiConnection';
-    if(code==='TIMEOUT')return 'error.apiTimeout';
-    if(code==='API_INCOMPLETE')return failure?.code==='OUTPUT_LIMIT'?'error.apiOutputLimit':'error.apiIncomplete';
-    return ({RATE_LIMIT:'status.rateLimited',NEEDS_KEY:'status.needsKey',KEY_MIGRATION_REQUIRED:'status.needsKey',
-      CANCELLED:'status.cancelled',RAIL_COLLAPSED:'status.disabled',URL_SEARCH_REQUIRED:'error.urlSearchRequired',API_LANGUAGE_MISMATCH:'error.outputLanguageMismatch'})[code]||'status.failed';
+    return Core.providerErrorKey(code,failure,settings.provider);
   }
   function requestSnapshot(entry,requestId,task='analysis') {
     return {requestId,task,entry,postSnapshot:entry.post,apiIdentity:Core.apiPostIdentity(entry.post,task==='comments'?undefined:settings),path:pageRouteKey(),provider:settings.provider,
-      language:settings.language,apiModel:settings.provider==='oauth'?settings.oauthModel:settings.provider==='build'?settings.buildModel:settings.apiModel,
+      language:settings.language,apiModel:Core.providerModel(settings),
       verifyPrompt:settings.verifyPrompt,commentsPrompt:settings.commentsPrompt};
   }
   function savedAnswerIdentity(entry) {
@@ -513,7 +504,7 @@
     }
     scheduleLayout();tick();
   }
-  function isAccountLimit(failure) {return settings.provider==='api'&&(failure?.httpStatus===402||['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded'].includes(Core.apiFailureProviderCode(failure?.providerCode)));}
+  function isAccountLimit(failure) {return Core.providers.get(settings.provider)?.caps.accountLimits===true&&(failure?.httpStatus===402||['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded'].includes(Core.apiFailureProviderCode(failure?.providerCode)));}
   function isCapacityFailure(code,failure) {return code==='API_CAPACITY'||failure?.errorCode==='API_CAPACITY';}
   function retryPhase(entry,task,phase,message={}) {
     const key=task==='comments'?'commentRetry':'analysisRetry';
@@ -565,6 +556,8 @@
       });
       handshakeTimer=setTimeout(()=>{if(port===nextPort&&awaitingConfig)connectionLost(new Error('Background configuration timed out'),nextPort);},8000);
       post({type:'UI_LANGUAGE',language:xUILanguage});
+      // The worker forgets a tab's layout report on every new port.
+      layoutReported='';reportLayout();
     } catch(error){connectionLost(error);}
   }
   function handleMessage(message) {
@@ -573,6 +566,7 @@
       return;
     }
     if(message.type==='HISTORY_CONFIG') {configureHistory(message.enabled,message.epoch);return;}
+    if(message.type==='LAYOUT_NOTICE_STATE'){layoutNoticeDismissed=typeof message.dismissed==='string'?message.dismissed:'';scheduleLayout();return;}
     if(message.type==='HISTORY_ACK') {
       const batch=historyPending.get(message.batchId);if(!batch)return;
       historyPending.delete(message.batchId);
@@ -584,8 +578,11 @@
     if(message.type==='CONFIG') {
       hasConfig=true;awaitingConfig=true;workerSleeping=false;reconnectFailures=0;
       if(message.triggerGuideCompleted===true){triggerGuideCompleted=true;if(message.triggerGuidePersisted!==false)triggerGuideCompletionPending=false;hideTriggerGuide();}
+      if(typeof message.layoutNoticeDismissed==='string')layoutNoticeDismissed=message.layoutNoticeDismissed;
       clearTimeout(handshakeTimer);handshakeTimer=undefined;
-      const nextSettings=Core.normalizeSettings(message.settings),previousOptions={...settings},nextOptions={...nextSettings};
+      // Claude without opt-in automatic checks behaves like Custom mode with
+      // only the post button enabled. Saved trigger choices are unchanged.
+      const nextSettings=(Core.effectiveTriggerSettings||(value=>value))(Core.normalizeSettings(message.settings)),previousOptions={...settings},nextOptions={...nextSettings};
       // Editing prompts affects new requests. Interface language only relabels
       // controls; accepted jobs and visible answers retain their task snapshot.
       // An archived explanation draft can survive upgrades, but never changes
@@ -602,7 +599,7 @@
       const accountChanged=credentialIdentity!==nextCredentialIdentity;
       const allChanged=accountChanged||JSON.stringify(previousOptions)!==JSON.stringify(nextOptions);
       const presentationOrPromptsOnlyChanged=!allChanged&&JSON.stringify(settings)!==JSON.stringify(nextSettings);
-      const identity=value=>JSON.stringify([value.provider,value.apiModel,value.apiReasoningEffort,value.oauthModel,value.oauthReasoningEffort,value.buildModel,value.buildReasoningEffort,value.buildTransport,value.buildPort,value.language,value.webSearch,value.xSearch,value.apiVerification,value.explanationMode]);
+      const identity=value=>JSON.stringify([value.provider,value.claudeModel,value.claudeEffort,value.claudeMaxSearches,value.apiModel,value.apiReasoningEffort,value.oauthModel,value.oauthReasoningEffort,value.buildModel,value.buildReasoningEffort,value.buildTransport,value.buildPort,value.language,value.webSearch,value.xSearch,value.apiVerification,value.explanationMode]);
       const previous=identity(settings),dwellChanged=settings.dwellMs!==nextSettings.dwellMs;
       const triggersChanged=JSON.stringify([settings.triggerMode,settings.customTriggers,settings.enabled])!==JSON.stringify([nextSettings.triggerMode,nextSettings.customTriggers,nextSettings.enabled]);
       const wasReady=providerReady;
@@ -747,15 +744,23 @@
         entry.verificationStarted=Boolean(readerText.trim()&&checkText.trim());
       }
       entry.phase=request.phase=message.phase;
-      const phases={starting:'status.verifying',explain:'status.explaining',verification_queued:'status.verificationQueued',verify:'status.verifying',inline:'status.inline'};
+      const phases={starting:'status.verifying',triage:'status.screening',explain:'status.explaining',verification_queued:'status.verificationQueued',verify:'status.verifying',inline:'status.inline'};
       status(entry,phases[message.phase]||'status.verifying');
-      if(suppliedText&&!(entry.keepRetryAnswer&&!readerText.trim())){renderAnswer(entry,readerText);if(readerText.trim())entry.keepRetryAnswer=false;}
+      if(suppliedText&&!(entry.keepRetryAnswer&&!readerText.trim())){entry.verdict=message.verdict;renderAnswer(entry,readerText);if(readerText.trim())entry.keepRetryAnswer=false;}
       else if(verifying&&entry.latestText)renderAnswer(entry,entry.latestText);
       if(message.sources)renderSources(entry,message.sources);
       if(message.warning)note(entry,['explain','verification_queued'].includes(message.phase)?'note.checkIncomplete':'note.possibleErrors');
     }
     if(message.type==='RESULT') {
       applyAnalysisResult(entry,request,message);
+      finishRequest(message);
+    }
+    if(message.type==='TRIAGE_SKIP') {
+      // A pre-screen found no checkable claim. The card keeps one line and a
+      // way to run the check after all; no answer exists to show.
+      entry.analysisRetry=null;entry.keepRetryAnswer=false;entry.status='skipped';entry.phase='';entry.result=null;entry.cached=false;
+      entry.triage={kind:Core.triageSkipKind(message.triage),local:message.triage?.local===true};
+      setVerificationFailure(entry,null,false);renderAnswer(entry,'',true);renderSources(entry,[]);note(entry,'');
       finishRequest(message);
     }
     if(['ERROR','RETRY_WAIT'].includes(message.type)) {
@@ -770,7 +775,7 @@
       const limit=Core.accountLimitReason?.(entry.verificationFailure);
       entry.status=retryWaiting?'retry-wait':'error';entry.phase='';entry.errorCode=message.code;status(entry,limit?'account.'+limit:isCapacityFailure(message.code,entry.verificationFailure)?'error.apiCapacity':partialVerification?'status.incomplete':errorKey(message.code,entry.verificationFailure));note(entry,'');entry.ui.retry.hidden=retryWaiting;
       if(['API_LANGUAGE_MISMATCH','BUILD_LANGUAGE_MISMATCH'].includes(message.code)){entry.cached=false;entry.result=null;renderAnswer(entry,'',true);renderSources(entry,[]);}
-      if(partialResult){entry.verificationStart=partialResult.verificationStart;renderAnswer(entry,partialResult.text,true);renderSources(entry,partialResult.sources||[]);note(entry,retained.invalid?'':partialResultNote(partialResult));}
+      if(partialResult){entry.verificationStart=partialResult.verificationStart;entry.verdict=partialResult.verdict;entry.gaps=partialResult.gaps;renderAnswer(entry,partialResult.text,true);renderSources(entry,partialResult.sources||[]);note(entry,retained.invalid?'':partialResultNote(partialResult));}
       entry.keepRetryAnswer=retryWaiting&&Boolean(entry.latestText?.trim());
       retryPhase(entry,'analysis',retryWaiting?'waiting':'exhausted',message);
       if(!entry.verificationFailure&&!entry.requestDiagnostics&&!entry.commentRequestDiagnostics) {
@@ -785,7 +790,7 @@
       finishRequest(message);
     }
     refreshCard(entry);if(request.task==='analysis')syncSharedPost(request);scheduleLayout();
-    if(['RESULT','ERROR'].includes(message.type))tick();
+    if(['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type))tick();
   }
   // API launch spacing belongs to the shared background scheduler; this page
   // submits all visible work without waiting for earlier answers to finish.
@@ -795,7 +800,7 @@
     captureUsage(entry,'analysis',result,request,Boolean(message.cached),true);
     entry.status=invalid?'error':'done';entry.result=result;entry.verificationStart=result.verificationStart;
     if(invalid)entry.errorCode='API_INCOMPLETE';
-    renderAnswer(entry,result.text,true);renderSources(entry,result.sources||[]);
+    entry.verdict=result.verdict;entry.gaps=result.gaps;renderAnswer(entry,result.text,true);renderSources(entry,result.sources||[]);
     const incomplete=['incomplete','failed'].includes(result.verificationStatus);
     if(incomplete)retryPhase(entry,'analysis','exhausted',message);
     entry.requestDiagnostics=Core.sanitizedRequestDiagnostics(result.requestDiagnostics||message.requestDiagnostics);
@@ -806,7 +811,7 @@
     note(entry,invalid?'':incomplete?partialResultNote(result):'note.possibleErrors');entry.ui.retry.hidden=false;
     if(isAccountLimit(entry.verificationFailure))note(entry,'note.accountLimit');
   }
-  function finishRequest(message) { if(!['RESULT','ERROR','COMMENT_RESULT','COMMENT_ERROR'].includes(message.type))return;requests.delete(message.requestId);pruneDetachedEntries(); }
+  function finishRequest(message) { if(!['RESULT','ERROR','TRIAGE_SKIP','COMMENT_RESULT','COMMENT_ERROR'].includes(message.type))return;requests.delete(message.requestId);pruneDetachedEntries(); }
   function affectsDisplayedPostBody(target) {
     if(DOM?.bodyNodes&&target?.nodeType) {
       const element=target.nodeType===1?target:target.parentElement;
@@ -1202,11 +1207,16 @@
     const primaryRect=primary?.getBoundingClientRect(),nativeCells=syncNativeCells(primary,primaryRect);
     const bounds=Layout.railBounds(primaryRect,sidebar?.getBoundingClientRect(),viewport);
     rail.hidden=railHeader.hidden=railSeparators.hidden=bounds.hidden||collapsed;railExpand.hidden=bounds.hidden||!collapsed;
-    if(bounds.hidden){hideTriggerGuide();syncNativeHeaders();pauseUnseenRailQueue();for(const item of items)item.id.card.hidden=true;return;}
+    if(bounds.hidden){hideTriggerGuide();placeLayoutNotice(bounds,0,viewport);syncNativeHeaders();pauseUnseenRailQueue();for(const item of items)item.id.card.hidden=true;return;}
     syncTheme(primary);
     for(const entry of entries.values())syncPostControl(entry);
     const header=headerGeometry(primary,viewport),headerHeight=header.top+header.height;
-    syncTriggerGuide(headerHeight);
+    // One calm notice at a time: a layout problem outranks the button hint.
+    const noticeShown=placeLayoutNotice(bounds,headerHeight,viewport);
+    if(noticeShown)hideTriggerGuide();else syncTriggerGuide(headerHeight);
+    // The notice is the rail's first card: answers start below it instead of
+    // being covered (and their buttons blocked) until it is dismissed.
+    const noticeHeight=noticeShown&&!collapsed?layoutNotice.offsetHeight:0,cardsTop=noticeHeight>0?headerHeight+12+noticeHeight+12:headerHeight;
     railHeader.dataset.compact=String(bounds.width<310);
     railHeader.style.borderBottomWidth=header.borderWidth+'px';
     for(const [element,geometry] of [[rail,bounds],[railHeader,{...bounds,top:header.top,height:header.height}],[railExpand,{left:bounds.left,top:header.top,width:32,height:header.height}]])for(const name of ['left','top','width','height']) {
@@ -1216,7 +1226,7 @@
     const extraLines=[],nativeArticles=[...geometryByArticle.keys()];
     for(const cell of nativeCells)extraLines.push(...postBoundarySeparators(cell,nativeCellSeparators(cell,primaryRect,viewport),nativeRows,nativeArticles));
     positionSeparators(nativeRows,bounds,viewport,headerHeight,extraLines);
-    for(const placement of Layout.placeRailRows(items,viewport,{headerHeight})) {
+    for(const placement of Layout.placeRailRows(items,viewport,{headerHeight:cardsTop})) {
       const entry=placement.id,card=entry.card;
       card.hidden=placement.hidden;
       if(placement.hidden)continue;
@@ -1330,11 +1340,30 @@
     }
     else if(entry.statusKey)status(entry,entry.statusKey,entry.statusVars);
     if(entry.noteKey)entry.ui.note.textContent=t(entry.noteKey);
-    if(entry.cached)entry.ui.status.prepend(document.createTextNode(t('status.cached')+' · '));
+    if(entry.cached){const age=cachedAge(entry.result?.completedAt);entry.ui.status.prepend(document.createTextNode(t('status.cached')+(age?' · '+age:'')+' · '));}
     entry.ui.retry.disabled=!usableConnection()||!settings.enabled||['queued','running','retry-wait'].includes(entry.status)||wakeActions.has(wakeKey(entry,'analysis'));
     if(!providerReady)entry.ui.retry.hidden=true;
     else if(['done','error'].includes(entry.status))entry.ui.retry.hidden=false;
-    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);syncPostControl(entry);
+    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);renderSources(entry);renderSkip(entry);syncPostControl(entry);
+  }
+  // A reused answer an hour old or more says how old it is: answers can be
+  // kept for days and a fact check goes stale with the news.
+  function cachedAge(completedAt) {
+    const age=Date.now()-completedAt;
+    if(!Number.isFinite(age)||age<60*60*1000)return '';
+    try{
+      const format=new Intl.RelativeTimeFormat(uiLanguage,{numeric:'auto',style:'short'}),hours=Math.floor(age/(60*60*1000));
+      return hours<24?format.format(-hours,'hour'):format.format(-Math.floor(hours/24),'day');
+    }catch{return '';}
+  }
+  function renderSkip(entry) {
+    const ui=entry.ui,skipped=entry.status==='skipped';
+    ui.box.toggleAttribute('data-skipped',skipped);
+    if(!skipped)return;
+    ui.skipLabel.textContent=t('verdict.none')+' · '+t('triage.kind.'+entry.triage.kind);
+    ui.skip.title=t(entry.triage.local?'triage.detailLocal':'triage.detailModel');
+    ui.checkAnyway.textContent=t('triage.checkAnyway');
+    ui.checkAnyway.disabled=!usableConnection()||!settings.enabled;
   }
   function automaticTrigger(entry) {
     if(entry.triggerSuppressed)return null;
@@ -1411,7 +1440,7 @@
     for(const entry of request.followers||[]){
       if(!nativeEntryCurrent(entry)){entry.card.hidden=true;continue;}
       if(Core.apiPostIdentity(entry.post,settings)!==request.apiIdentity){request.followers.delete(entry);continue;}
-      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed'])entry[field]=source[field];
+      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed','verdict','gaps','triage'])entry[field]=source[field];
       entry.pending=false;entry.since=0;entry.analysisUsage=source.analysisUsage?{...source.analysisUsage}:null;
       renderAnswer(entry,source.latestText||'',true);renderSources(entry,source.sourceList||[]);note(entry,source.noteKey||'');refreshCard(entry);
     }
@@ -1425,7 +1454,53 @@
     if(collapsed)setCollapsed(false,true);
     const active=activePostRequest(entry);if(active){sharePostRequest(active,entry);completeTriggerGuide(kind);return;}
     if(kind!=='manual'&&entry.status!=='new'){if(entry.status==='done')completeTriggerGuide(kind);scheduleLayout();return;}
-    submit(entry,kind==='manual'&&entry.status!=='new',kind,true);
+    // A skipped post has no answer to replace, so its first click is a check.
+    submit(entry,kind==='manual'&&!['new','skipped'].includes(entry.status),kind,true);
+  }
+  function probeLayout() {
+    // Never judge a page the user cannot see, one covered by an X dialog, or
+    // one SuperX is not working on. Those probes simply do not happen, but
+    // leaving a broken page for an unsupported one still ends its failure.
+    if(document.hidden||pageSuspended||needsPageRefresh||!hasConfig||!settings.enabled)return;
+    if(!supportedPage()){if(layoutState?.code){layoutState=null;scheduleLayout();reportLayout();}return;}
+    if(syncXModalVisibility())return;
+    const previous=layoutState?.code||'';
+    layoutState=Core.layoutHealthStep(layoutState,{page:pageRouteKey(),probe:DOM.layoutProbe(document),
+      postButton:triggerMode()==='custom'&&settings.customTriggers.manual},Date.now());
+    if((layoutState.code||'')===previous)return;
+    renderLayoutNotice();scheduleLayout();reportLayout();
+  }
+  function currentLayoutReport() {
+    return layoutState?.code?Core.layoutReport({...layoutState.probe,code:layoutState.code,language:xUILanguage}):null;
+  }
+  function reportLayout() {
+    // Only transitions reach the worker. A sleeping worker is woken, and the
+    // new port then carries the current state (see connect).
+    const code=layoutState?.code||'';
+    if(code===layoutReported)return;
+    if(connected){if(post({type:'LAYOUT_HEALTH',report:currentLayoutReport()}))layoutReported=code;}
+    else if(workerSleeping)connect();
+  }
+  function renderLayoutNotice() {
+    const report=currentLayoutReport();
+    if(!report)return;
+    layoutNotice.lang=uiLanguage;layoutNotice.dir=uiLanguage==='ar'?'rtl':'ltr';
+    layoutTitleText.textContent=t('layout.title');
+    layoutBody.textContent=t(report.code==='posts'?'layout.posts':'layout.actions');
+    layoutReport.textContent=t('layout.report');layoutDismiss.textContent=t('layout.dismiss');
+    layoutReport.href=Core.layoutIssueURL(report,{version:extensionVersion,userAgent:navigator.userAgent,now:Date.now()});
+  }
+  function placeLayoutNotice(bounds,headerHeight,viewport) {
+    // At the top of the rail; floating only when X's column (and so the rail)
+    // cannot be found. A narrow window or a collapsed rail shows nothing here.
+    let geometry=null;
+    if(layoutState?.code&&layoutState.page===pageRouteKey()&&settings.enabled&&!needsPageRefresh&&layoutNoticeDismissed!==extensionVersion){
+      if(!bounds.hidden&&!collapsed)geometry={left:bounds.left+12,top:headerHeight+12,width:bounds.width-24};
+      else if(bounds.reason==='invalid-primary'){const width=Math.min(300,viewport.width-32);geometry={left:viewport.width-16-width,top:64,width};}
+    }
+    layoutNotice.hidden=!geometry;
+    if(geometry)for(const [name,value] of Object.entries(geometry)){const px=value+'px';if(layoutNotice.style[name]!==px)layoutNotice.style[name]=px;}
+    return Boolean(geometry);
   }
   function hideTriggerGuide() {
     triggerGuide.hidden=true;triggerGuideEntry=null;
@@ -1680,7 +1755,7 @@
     // A newly restored timeline must never see the fallback 32px control before
     // its actual native dimensions. Keep our control out of scroll-anchor selection.
     if(entry.checkHost.parentElement!==location.row||entry.checkHost.nextElementSibling!==location.anchor){entry.hoverProgressState=undefined;location.row.insertBefore(entry.checkHost,location.anchor);}
-    const running=['queued','running','retry-wait'].includes(entry.status),label=t(running?'trigger.checkingPost':entry.status==='new'?'trigger.checkPost':'trigger.recheckPost');
+    const running=['queued','running','retry-wait'].includes(entry.status),label=t(running?'trigger.checkingPost':['new','skipped'].includes(entry.status)?'trigger.checkPost':'trigger.recheckPost');
     entry.checkButton.title=label;entry.checkButton.setAttribute('aria-label',label);entry.checkButton.setAttribute('aria-busy',String(running));
     entry.checkButton.disabled=running||!usableConnection();
     syncPostHoverProgress(entry);
@@ -1821,7 +1896,7 @@
     forgetCacheLookup(entry);
     entry.analysisRetry=null;entry.keepRetryAnswer=false;
     const requestId=crypto.randomUUID();
-    entry.pending=false;entry.since=0;queue.remove(entry.post.id);entry.status='queued';entry.phase='';entry.verificationBase='';entry.verificationStarted=false;entry.verificationStart=undefined;entry.result=null;entry.cached=false;entry.requestDiagnostics=undefined;setVerificationFailure(entry,null,false);status(entry,'status.queued');entry.ui.retry.hidden=true;
+    entry.pending=false;entry.since=0;queue.remove(entry.post.id);entry.status='queued';entry.phase='';entry.verificationBase='';entry.verificationStarted=false;entry.verificationStart=undefined;entry.result=null;entry.cached=false;entry.requestDiagnostics=undefined;setVerificationFailure(entry,null,false);status(entry,'status.queued');entry.ui.retry.hidden=true;renderSkip(entry);
     if(force||!entry.ui.answer.textContent)renderAnswer(entry,'',true);
     renderSources(entry,[]);note(entry,'');entry.ui.diagnostics.hidden=true;entry.ui.diagnosticText.textContent='';
     requests.set(requestId,{...requestSnapshot(entry,requestId),force:force===true,triggerKind});
@@ -1890,12 +1965,12 @@
     if(replace||metadata.usage!==undefined)record.usage=usageFields(metadata.usage);
     if(replace||metadata.usageByStage!==undefined) {
       record.byStage={};
-      for(const stage of ['url','inline','explain','verify','comments'])if(metadata.usageByStage?.[stage]&&typeof metadata.usageByStage[stage]==='object')record.byStage[stage]=usageFields(metadata.usageByStage[stage]);
+      for(const stage of ['url','inline','explain','triage','verify','comments'])if(metadata.usageByStage?.[stage]&&typeof metadata.usageByStage[stage]==='object')record.byStage[stage]=usageFields(metadata.usageByStage[stage]);
     }
     if(replace||metadata.model!==undefined)record.model=safeModel(metadata.model);
     if(replace||metadata.modelByStage!==undefined) {
       record.models=[];
-      for(const stage of ['url','inline','explain','verify','comments']){const model=safeModel(metadata.modelByStage?.[stage]);if(model&&!record.models.includes(model))record.models.push(model);}
+      for(const stage of ['url','inline','explain','triage','verify','comments']){const model=safeModel(metadata.modelByStage?.[stage]);if(model&&!record.models.includes(model))record.models.push(model);}
     }
     if(typeof metadata.usageComplete==='boolean')record.complete=metadata.usageComplete;
     else if(replace)record.complete=undefined;
@@ -1927,10 +2002,13 @@
     label.hidden=!entry.latestText&&!entry.comments.length&&!known;
     // Completed provenance belongs with the usage details rather than a
     // repeated heading. Keep progress, onboarding and incomplete/error states
-    // visible even when the row also owns a reported token subtotal.
+    // visible even when the row also owns a reported token subtotal, and keep
+    // the age of an older reused answer in view.
     const completedMetadata=entry.status==='done'&&['status.searched','status.unverified'].includes(entry.statusKey);
-    entry.ui.status.hidden=completedMetadata&&!label.hidden;
+    entry.ui.status.hidden=completedMetadata&&!label.hidden&&!(entry.cached&&cachedAge(entry.result?.completedAt));
     if(completedMetadata)lines.push(t(entry.statusKey));
+    const route=entry.result?.claudeRoute?.reason;
+    if(Core.TRIAGE_ROUTES.includes(route))lines.push(t('route.'+route));
     const text=known&&tokenCount(total)!==null?t(incomplete?'usage.known':'usage.total',{count:countText(total)}):t(pending?'usage.pending':'usage.unavailable');
     if(label.textContent!==text)label.textContent=text;
     if(incomplete&&known)lines.push(t('usage.partial'));
@@ -1938,12 +2016,19 @@
     if(label.title!==title)label.title=title;
     if(label.getAttribute('aria-label')!==aria)label.setAttribute('aria-label',aria);
   }
+  function formatNumber(value){try{if(!numberFormatters.has(uiLanguage))numberFormatters.set(uiLanguage,new Intl.NumberFormat(uiLanguage));return numberFormatters.get(uiLanguage).format(value);}catch{return String(value);}}
   function node(tag,className,text){const e=document.createElement(tag);if(className)e.className=className;if(text)e.textContent=text;return e;}
   function chevron(direction){
     const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');
     svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
     path.setAttribute('d',direction==='left'?'M15 5l-7 7 7 7':direction==='right'?'M9 5l7 7-7 7':'M5 9l7 7 7-7');
     path.setAttribute('fill','none');path.setAttribute('stroke','currentColor');path.setAttribute('stroke-width','2');path.setAttribute('stroke-linecap','round');path.setAttribute('stroke-linejoin','round');svg.append(path);return svg;
+  }
+  function infoIcon(){
+    const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');
+    svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+    path.setAttribute('d','M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 11v5M12 7.5v.01');
+    path.setAttribute('fill','none');path.setAttribute('stroke','currentColor');path.setAttribute('stroke-width','1.8');path.setAttribute('stroke-linecap','round');svg.append(path);return svg;
   }
   function gear(){
     const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');
@@ -1971,7 +2056,7 @@
       .answer code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em;white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.13);padding:1px 4px}.answer pre{max-width:100%;margin:12px 0;padding:10px;border:1px solid var(--gf-border,#2f3336);white-space:pre-wrap;overflow-wrap:anywhere}.answer pre code{display:block;font-size:.85em;background:transparent;padding:0;white-space:pre-wrap;overflow-wrap:anywhere}.answer hr{border:0;border-top:1px solid var(--gf-border,#2f3336);margin:16px 0}
       .answer .analysis-section>:first-child{margin-top:0}.answer .analysis-section>:last-child{margin-bottom:0}.answer .analysis-divider{margin:16px 0}.answer .analysis-divider[hidden],.answer .verification-answer[hidden]{display:none}
       .answer table{width:100%;max-width:100%;table-layout:fixed;border-collapse:collapse;font-size:.9em;margin:12px 0}.answer th,.answer td{border:1px solid var(--gf-border,#2f3336);padding:6px;text-align:start;vertical-align:top;overflow-wrap:anywhere;word-break:break-word}.answer th{font-weight:700}.answer .md-align-left{text-align:left}.answer .md-align-center{text-align:center}.answer .md-align-right{text-align:right}.answer .markdown-literal{white-space:pre-wrap}
-      a{color:var(--gf-accent,#1d9bf0);text-decoration:none;overflow-wrap:anywhere;word-break:break-word;}a:hover{text-decoration:underline}.sources{font-size:13px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin-top:12px}.sources:empty{display:none}.note{color:var(--gf-muted,#71767b);font-size:12px;margin-top:12px;overflow-wrap:anywhere;}.note:empty{display:none}
+      a{color:var(--gf-accent,#1d9bf0);text-decoration:none;overflow-wrap:anywhere;word-break:break-word;}a:hover{text-decoration:underline}.sources{font-size:13px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin-top:12px}.sources:empty{display:none}.source-mix{color:var(--gf-muted,#71767b);font-size:12px;line-height:16px}.source-weak{display:block;margin-top:2px;color:var(--gf-fg,#e7e9ea)}.source-row{display:flex;align-items:baseline;gap:6px;min-width:0}.source-row a{min-width:0}.tier{flex:none;font-size:11px;line-height:16px;padding:0 5px;border:1px solid color-mix(in srgb,var(--gf-muted,#71767b) 45%,transparent);border-radius:4px;color:var(--gf-muted,#71767b);white-space:nowrap}.note{color:var(--gf-muted,#71767b);font-size:12px;margin-top:12px;overflow-wrap:anywhere;}.note:empty{display:none}
       .usage-help{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:10px;font-size:13px}.usage-help[hidden]{display:none}
       .actions{display:none;flex-wrap:wrap;gap:12px;margin-top:12px;font-size:13px}.actions:has(button:not([hidden])){display:flex}.actions button[hidden]{display:none}
       .retry-status{color:var(--gf-muted,#71767b);font-size:12px;overflow-wrap:anywhere;margin-top:10px}.retry-status[hidden]{display:none}
@@ -1981,9 +2066,17 @@
       .comments{display:grid;gap:0;margin-top:12px;border-top:1px solid var(--gf-border,#2f3336)}.comments[hidden],.comment-status[hidden]{display:none}.comments .comment-copy{display:block;width:100%;padding:10px 0;text-align:start;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--gf-fg,#e7e9ea);font-size:14px;border-bottom:1px solid var(--gf-border,#2f3336)}.comments .comment-copy:hover{background:rgba(127,127,127,.1);text-decoration:none}.comment-heading{font-size:13px;font-weight:700;margin-top:16px}.comment-hint{font-size:12px;color:var(--gf-muted,#71767b);margin-top:4px}.comment-heading[hidden],.comment-hint[hidden]{display:none}.comment-status,.copy-status{font-size:12px;color:var(--gf-muted,#71767b);overflow-wrap:anywhere;margin-top:10px}.copy-status:empty{display:none}
       @media(prefers-reduced-motion:reduce){.dot{animation:none;opacity:.7}.shimmer{animation:none;background:none;color:var(--gf-muted,#71767b)}}
       .diagnostics{font-size:12px;color:var(--gf-muted,#71767b);margin-top:12px}.diagnostics[hidden]{display:none}.diagnostics summary{cursor:pointer}.diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+      .verdict{--v:var(--gf-muted,#71767b);display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin-bottom:10px}.verdict[hidden]{display:none}
+      .verdict[data-verdict=accurate]{--v:#00ba7c}.verdict[data-verdict=inaccurate]{--v:#f4212e}.verdict[data-verdict=mixed]{--v:#ffad1f}
+      .verdict-badge{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700}.verdict-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--v);border:1.5px solid var(--v)}
+      .verdict[data-tentative] .verdict-dot,.verdict[data-verdict=unproven] .verdict-dot,.verdict[data-verdict=none] .verdict-dot{background:transparent}
+      .verdict-gaps{color:var(--gf-muted,#71767b);font-size:12px;overflow-wrap:anywhere}.verdict-gaps span{cursor:help}
+      .skip{display:none;--v:var(--gf-muted,#71767b);flex-wrap:wrap;align-items:flex-start;gap:4px 10px}.card[data-skipped]>:not(.skip){display:none!important}.card[data-skipped]>.skip{display:flex}
+      .skip .verdict-badge{align-items:flex-start;font-weight:400;color:var(--gf-muted,#71767b)}.skip .verdict-dot{margin-top:6px;background:transparent}.check-anyway{flex:none;margin-inline-start:auto;padding:0;font-size:13px}
       .token-usage{display:block;color:var(--gf-muted,#71767b);font-size:12px;margin-bottom:10px;overflow-wrap:anywhere;cursor:help}.token-usage[hidden]{display:none}.token-usage:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px}
     `;
     const box=node('section','card');box.setAttribute('aria-label',t('aria.result'));
+    const verdict=node('div','verdict');verdict.hidden=true;verdict.setAttribute('role','group');
     const status=node('div','status'),answer=node('div','answer'),sources=node('div','sources'),note=node('div','note'),actions=node('div','actions');status.setAttribute('role','status');
     answer.setAttribute('dir','auto');
     const explanationAnswer=node('div','analysis-section explanation-answer'),verificationAnswer=node('div','analysis-section verification-answer'),analysisDivider=node('hr','analysis-divider');analysisDivider.hidden=true;
@@ -1999,11 +2092,16 @@
     const retryStatus=node('div','retry-status analysis-retry-status'),commentRetryStatus=node('div','retry-status comment-retry-status');
     for(const label of [retryStatus,commentRetryStatus]){label.hidden=true;label.setAttribute('role','status');label.setAttribute('aria-live','polite');}
     const tokenUsage=node('span','token-usage');tokenUsage.hidden=true;tokenUsage.tabIndex=0;
-    actions.append(retry,generateButton);box.append(tokenUsage,status,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus);shadow.append(css,box);
+    // A skipped post's only line: the hollow "no checkable claim" dot.
+    const skip=node('div','skip'),skipBadge=node('span','verdict-badge'),skipDot=node('span','verdict-dot'),skipLabel=node('span','skip-label');
+    skipDot.setAttribute('aria-hidden','true');skipBadge.append(skipDot,skipLabel);
+    const checkAnyway=node('button','check-anyway');checkAnyway.addEventListener('click',()=>{if(entry.status==='skipped'&&!checkAnyway.disabled)submit(entry,false,'recheck');});
+    skip.append(skipBadge,checkAnyway);
+    actions.append(retry,generateButton);box.append(tokenUsage,status,verdict,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus,skip);shadow.append(css,box);
     // Card controls belong to the overlay, separate from X's navigation handlers.
     for(const type of ['click','pointerdown','keydown'])card.addEventListener(type,event=>event.stopPropagation());
     card.addEventListener('scroll',scheduleLayout,{passive:true});
-    return {card,ui:{box,status,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
+    return {card,ui:{box,skip,skipLabel,checkAnyway,status,verdict,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
   }
   function validVerificationBoundary(text,start) {
     return typeof text==='string'&&Number.isSafeInteger(start)&&start>2&&start<=text.length&&text.slice(start-2,start)==='\n\n'&&Boolean(text.slice(0,start-2).trim());
@@ -2033,11 +2131,26 @@
   }
   function renderAnswer(entry,text,immediate=false) {
     entry.latestText=typeof text==='string'?text:'';
-    if(!entry.latestText){entry.verificationStart=undefined;entry.verificationBase='';}
-    syncLoading(entry);
+    if(!entry.latestText){entry.verificationStart=undefined;entry.verificationBase='';entry.verdict=undefined;entry.gaps=undefined;}
+    syncLoading(entry);renderVerdict(entry);
     if(immediate){if(entry.answerFrame!==undefined)cancelAnimationFrame(entry.answerFrame);entry.answerFrame=undefined;renderAnswerContent(entry);renderSources(entry);return;}
     if(entry.answerFrame!==undefined)return;
     entry.answerFrame=requestAnimationFrame(()=>{entry.answerFrame=undefined;if(!entry.card.isConnected)return;renderAnswerContent(entry);renderSources(entry);scheduleLayout();});
+  }
+  // The verdict shows as soon as a stream states it; gaps only once the run
+  // has ended, because "No search" mid-stream would be premature.
+  function renderVerdict(entry) {
+    const row=entry.ui.verdict,ended=['done','error','retry-wait'].includes(entry.status);
+    const view=Core.verdictRow({verdict:entry.verdict,gaps:ended?entry.gaps:[]},t),signature=JSON.stringify(view);
+    // Streaming re-renders the answer per delta; rebuild the row only on change.
+    if(row.verdictSignature===signature)return;
+    row.verdictSignature=signature;row.replaceChildren();row.hidden=view.empty;
+    if(view.verdict)row.setAttribute('data-verdict',view.verdict);else row.removeAttribute('data-verdict');
+    if(view.tentative)row.setAttribute('data-tentative','');else row.removeAttribute('data-tentative');
+    if(view.empty){row.removeAttribute('aria-label');return;}
+    row.setAttribute('aria-label',view.aria);
+    if(view.label){const badge=node('span','verdict-badge'),dot=node('span','verdict-dot');dot.setAttribute('aria-hidden','true');badge.append(dot,node('span','verdict-label',view.label));row.append(badge);}
+    if(view.gaps.length){const list=node('span','verdict-gaps',view.prefix);for(const gap of view.gaps){const item=node('span','',gap.label);item.title=gap.title;list.append(' · ',item);}row.append(list);}
   }
   function renderText(target,text) {
     GrokFirstMarkdown.render(target,text);
@@ -2054,16 +2167,37 @@
     try {path=decodeURIComponent(path);}catch{}
     return (url.hostname+path+url.search+url.hash).slice(0,200);
   }
+  // Tier labels come from the address only and are computed on every render,
+  // so they follow the interface language and never reach storage.
+  function labelSourceLink(link,url) {
+    if(!authoredTitles.has(link))authoredTitles.set(link,link.title||'');
+    const tier=Sources.tier(url.href),label=t('source.'+tier)+' · '+Sources.displayHost(url.href);
+    link.dataset.sourceTier=tier;link.title=[authoredTitles.get(link),label].filter(Boolean).join('\n');
+  }
   function renderSources(entry,sources) {
     if(sources!==undefined)entry.sourceList=Array.isArray(sources)?sources:[];
-    const target=entry.ui.sources;target.replaceChildren();
-    const seen=new Set(Array.from(entry.ui.answer.querySelectorAll('a')).map(link=>sourceUrl(link.href)?.href).filter(Boolean));
-    let count=0;
+    const inline=Array.from(entry.ui.answer.querySelectorAll('a')).map(link=>[link,sourceUrl(link.href)]).filter(([,url])=>url);
+    for(const [link,url] of inline)labelSourceLink(link,url);
+    const seen=new Set(inline.map(([,url])=>url.href)),rows=[];
     for(const source of entry.sourceList||[]) {
       const url=sourceUrl(source?.url);if(!url||seen.has(url.href))continue;
-      seen.add(url.href);
-      const link=node('a','',sourceLabel(source,url));link.href=url.href;link.title=url.href;link.target='_blank';link.rel='noopener noreferrer';target.append(link);
-      if(++count===12)break;
+      seen.add(url.href);rows.push({href:url.href,label:sourceLabel(source,url),tier:Sources.tier(url.href)});
+      if(rows.length===12)break;
+    }
+    // Like the verdict gaps, the mix waits for the run to end so a streaming
+    // answer does not flicker between counts.
+    const ended=['done','error','retry-wait'].includes(entry.status);
+    const mix=ended?Sources.mixView(Sources.summarize([...inline.map(([,url])=>url.href),...(entry.sourceList||[]).map(source=>source?.url)],{exclude:[entry.post?.url]}),t,formatNumber):null;
+    const target=entry.ui.sources,signature=JSON.stringify([uiLanguage,rows,mix]);
+    // Streaming and card refreshes call this often; keep link nodes (and any
+    // keyboard focus on them) unless something visible changed.
+    if(target.sourceSignature===signature)return;
+    target.sourceSignature=signature;target.replaceChildren();
+    if(mix){const line=node('div','source-mix',mix.text);line.title=mix.hint;if(mix.weak)line.append(node('span','source-weak',mix.weak));target.append(line);}
+    for(const row of rows) {
+      const item=node('div','source-row'),link=node('a','',row.label);
+      link.href=row.href;link.title=row.href;link.target='_blank';link.rel='noopener noreferrer';
+      item.append(node('span','tier tier-'+row.tier,t('source.'+row.tier)),link);target.append(item);
     }
   }
 })();

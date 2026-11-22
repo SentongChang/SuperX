@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url';
 export const MANIFEST_LOCALES = Object.freeze(['en', 'zh_CN', 'zh_TW', 'ja', 'ko', 'es', 'fr', 'de', 'pt_BR', 'pt_PT', 'ar', 'ru', 'hi']);
 export const PRODUCTION_FILES = Object.freeze([
   ...MANIFEST_LOCALES.map(locale => `_locales/${locale}/messages.json`),
-  'api-provider.js',
+  'api-provider.js', 'claude-transport.js',
   'assets/icon-128.png', 'assets/icon-16.png', 'assets/icon-32.png', 'assets/icon-48.png',
   'assets/superx-logo.svg', 'assets/superx-symbol.svg',
   'background.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'content.js', 'draft-composer.js', 'feed-core.js', 'history-store.js', 'history.css', 'history.html', 'history.js', 'key-store.js', 'LICENSE.txt', 'manifest.json',
   'markdown-renderer.js', 'marked-LICENSE.txt', 'marked.umd.js',
-  'oauth-provider.js', 'options.css', 'options.html', 'options.js', 'overlay-layout.js',
-  'popup.css', 'popup.html', 'popup.js', 'privacy.html', 'setup.css', 'setup.html', 'setup.js', 'ui-i18n.js', 'x-dom.js',
+  'oauth-provider.js', 'onboarding.css', 'onboarding.html', 'onboarding.js', 'options.css', 'options.html', 'options.js', 'overlay-layout.js',
+  'popup.css', 'popup.html', 'popup.js', 'privacy.html', 'provider-registry.js', 'setup.css', 'setup.html', 'setup.js', 'source-quality.js', 'ui-i18n.js', 'x-dom.js',
 ].sort());
 
 const productionSet = new Set(PRODUCTION_FILES);

@@ -228,3 +228,18 @@ test('invalid post input and missing retrieval switches fail before opening a lo
 test('official connection runs one task at a time and rejects overlap without cross-attributing output',async()=>{
   const f=fixture({holdPrompt:true});try{const first=f.provider.run(post,settings);await tick();await assert.rejects(f.provider.run({...post,id:'124',url:'https://x.com/author/status/124'},settings),{code:'BUILD_BUSY'});assert.equal(prompts(f).length,1);f.finish();assert.equal((await first).text,'The date remains unconfirmed.');}finally{await f.provider.close();}
 });
+
+test('Build strips the verdict marker from streamed, final and partial text',async()=>{
+  const updates=[];let f=fixture({chunks:['VERDICT: UNPROVEN; LI','MITS: TEXT\n\n','The date remains unconfirmed.']});
+  try{
+    const result=await f.provider.run({...post,textTruncated:true},{...settings,xSearch:true},{onUpdate:update=>updates.push(update)});
+    assert.equal(updates.some(update=>/VERDICT|LIMITS/.test(update.text||'')),false);
+    assert.equal(updates.find(update=>update.text).verdict,'unproven');
+    assert.equal(result.text,'The date remains unconfirmed.');assert.equal(result.verdict,'unproven');
+    assert.equal(result.searched,true);assert.deepEqual(result.gaps,['text'],'X search does not remove a model-reported text limit');
+  }finally{await f.provider.close();}
+  f=fixture({text:'VERDICT: NONE'});
+  try{await assert.rejects(f.provider.run(post,settings),error=>error.code==='BUILD_OUTPUT_INVALID'&&!error.partialResult&&error.usage.total_tokens===30);}finally{await f.provider.close();}
+  f=fixture({text:'VERDICT: INACCURATE\nThe date is wrong.',disconnectPrompt:true});
+  try{await assert.rejects(f.provider.run(post,settings),error=>error.code==='BUILD_DISCONNECTED'&&error.partialResult.text==='The date is wrong.'&&error.partialResult.verdict==='inaccurate');}finally{await f.provider.close();}
+});

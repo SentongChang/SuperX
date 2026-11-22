@@ -32,6 +32,7 @@ class Node {
   replaceChildren(...nodes) {this.childNodes = [];this.value = '';this.append(...nodes);}
   setAttribute(name,value) {this.attributes.set(name,String(value));}
   getAttribute(name) {return this.attributes.get(name) ?? null;}
+  removeAttribute(name) {this.attributes.delete(name);}
   matches(selector) {return selector.split(',').some(part => {const match = part.trim().match(/^(?:([\w-]+))?(?:\[([\w-]+)(?:="([^"]*)")?\])?$/);return match && (!match[1] || this.tagName === match[1].toUpperCase()) && (!match[2] || this.attributes.has(match[2]) && (match[3] === undefined || this.getAttribute(match[2]) === match[3]));});}
   querySelectorAll(selector) {return descendants(this).filter(node => node.nodeType === 1 && node.matches(selector));}
   addEventListener(type,listener) {const list = this.events.get(type) || [];list.push(listener);this.events.set(type,list);}
@@ -318,4 +319,57 @@ test('closed answers release rendered nodes and reopen safely on demand',async (
 
 test('invalid usage and boundary metadata cannot break rendering a saved answer',async () => {
   const page = fixture({entries:[post('1',{analysis:{text:'**Available answer**',verificationStart:1n,usage:{total_tokens:1n,input_tokens:-1,output_tokens:Infinity},sources:[]}})]});await page.controller.start();await page.openFirstAnswer();assert.equal(nodes(page.$('history-list'),'strong')[0].textContent,'Available answer');assert.equal(page.$('history-status').dataset.state,'success');
+});
+
+test('a saved verdict and its gaps open the answer, and legacy records show no row',async () => {
+  const page = fixture({entries:[post('1',{analysis:{text:'Saved answer',sources:[],verdict:'inaccurate',gaps:['video','search']}}),post('2',{analysis:{text:'Legacy answer',sources:[]}})]});
+  await page.controller.start();
+  const [details,legacy] = nodes(page.$('history-list'),'details');details.open = legacy.open = true;await details.trigger('toggle');await legacy.trigger('toggle');
+  const row = nodes(details,'div').find(node => node.className === 'verdict');
+  assert.equal(nodes(details.childNodes[1])[0],row,'The verdict is the first element of the answer');
+  assert.equal(row.hidden,false);assert.equal(row.getAttribute('data-verdict'),'inaccurate');assert.equal(row.getAttribute('data-tentative'),'');
+  assert.equal(row.textContent,'InaccuratePartial check · Video not watched · No search');
+  assert.equal(row.getAttribute('aria-label'),'Fact check result: Inaccurate. Partial check: Video not watched, No search');
+  assert.equal(nodes(row,'span').find(node => node.textContent === 'No search').title,ui.t('gaps.searchTitle','en'));
+  assert.equal(nodes(legacy,'div').some(node => node.className === 'verdict' && !node.hidden),false);
+  await page.runtime({type:'UI_LANGUAGE_CHANGED',language:'zh-CN'});
+  assert.equal(row.textContent,'不准确核查不完整 · 未观看视频 · 未搜索');
+});
+
+test('a changed verdict re-renders a saved answer and invalid values render nothing',async () => {
+  const page = fixture({entries:[post('1',{analysis:{text:'Same answer',sources:[],verdict:'mixed'}})]});await page.controller.start();await page.openFirstAnswer();
+  page.setSnapshot(snapshot([post('1',{analysis:{text:'Same answer',sources:[],verdict:'accurate'}})]));await page.controller.refresh({forceList:false});
+  const row = () => nodes(page.$('history-list'),'div').find(node => node.className === 'verdict');
+  assert.equal(row().getAttribute('data-verdict'),'accurate');assert.equal(row().textContent,'Accurate');
+  page.setSnapshot(snapshot([post('1',{analysis:{text:'Same answer',sources:[],verdict:'sure',gaps:['smell']}})]));await page.controller.refresh({forceList:false});
+  assert.equal(row().hidden,true);assert.equal(row().textContent,'');
+});
+
+test('history labels footer sources, counts every cited page and relabels on a language change',async () => {
+  const page = fixture({entries:[post('1',{analysis:{text:'See [the wire](https://www.reuters.com/a).',sources:[{url:'https://www.reuters.com/a',title:'1'},{url:'https://x.com/someone/status/2',title:'A reply'},{url:'https://x.com/test/status/1/photo/1',title:'The post'}]}})]});
+  await page.controller.start();const details = await page.openFirstAnswer();
+  const block = nodes(details,'div').find(node => node.className === 'answer-sources');
+  const mix = block.childNodes[0];
+  assert.equal(mix.className,'source-mix');assert.equal(mix.textContent,'Sources: News 1 · Social 1');
+  assert.equal(mix.title,"Labels come from the web address only; they don't rate the page itself.");
+  const chips = nodes(block,'span').filter(node => node.className.startsWith('tier '));
+  assert.deepEqual(chips.map(node => [node.className,node.textContent]),[['tier tier-social','Social'],['tier tier-social','Social']]);
+  const inline = nodes(details,'a').find(node => node.href === 'https://www.reuters.com/a');
+  assert.equal(inline.dataset.sourceTier,'news');assert.equal(inline.title,'News · reuters.com');
+  await page.runtime({type:'UI_LANGUAGE_CHANGED',language:'zh-CN'});
+  assert.equal(mix.textContent,'来源：新闻 1 · 社交媒体 1');assert.equal(chips[0].textContent,'社交媒体');assert.equal(inline.title,'新闻 · reuters.com');
+});
+
+test('history adds the missing-source line only beside footer rows',async () => {
+  const page = fixture({entries:[
+    post('1',{analysis:{text:'Only a forum thread.',sources:[{url:'https://www.reddit.com/r/a',title:'Thread'}]}}),
+    post('2',{lastViewedAt:current-2000,analysis:{text:'[Inline only](https://www.reddit.com/r/b)',sources:[{url:'https://www.reddit.com/r/b',title:'1'}]}})
+  ]});
+  await page.controller.start();
+  for (const details of nodes(page.$('history-list'),'details')) {details.open = true;await details.trigger('toggle');}
+  const [weak,inline] = page.articles();
+  const block = nodes(weak,'div').find(node => node.className === 'answer-sources');
+  assert.equal(nodes(block,'span').find(node => node.className === 'source-weak').textContent,'No official, academic or news source cited');
+  assert.equal(nodes(inline,'div').some(node => node.className === 'answer-sources'),false,'Inline-only sources add no extra block');
+  assert.equal(nodes(inline,'a').find(node => node.href === 'https://www.reddit.com/r/b').title,'Social · reddit.com');
 });

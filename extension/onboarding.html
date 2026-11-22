@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SuperX · Set up SuperX</title><link rel="icon" href="assets/icon-32.png"><link rel="stylesheet" href="setup.css"><link rel="stylesheet" href="onboarding.css">
+</head>
+<body>
+  <main>
+    <header><img src="assets/superx-logo.svg" alt="SuperX"><button id="skip" class="text-button" type="button" data-i18n="onboarding.skip">Skip for now</button></header>
+    <form id="flow" novalidate>
+      <h1 data-i18n="onboarding.title">Set up SuperX</h1>
+      <p class="muted" data-i18n="onboarding.subtitle">Three quick steps. You can change everything later in Settings.</p>
+      <p id="progress" class="progress" aria-live="polite"></p>
+      <fieldset id="step-connect">
+        <legend><h2 data-i18n="onboarding.connectTitle">How should SuperX connect?</h2></legend>
+        <label class="choice"><input id="connect-oauth" name="connect" type="radio" value="oauth"><span><strong data-i18n="onboarding.oauthTitle">Sign in with Grok</strong> <span class="badge" data-i18n="onboarding.recommended">Recommended</span><span class="muted" data-i18n="onboarding.oauthBody"></span></span></label>
+        <label class="choice"><input id="connect-key" name="connect" type="radio" value="key"><span><strong data-i18n="onboarding.keyTitle">Use an API Key</strong><span class="muted" data-i18n="onboarding.keyBody"></span></span></label>
+        <p class="aside"><a href="setup.html" data-i18n="onboarding.localLink">Run Grok on this computer (advanced)</a></p>
+      </fieldset>
+      <section id="step-auth" hidden>
+        <div id="auth-oauth">
+          <h2 data-i18n="oauth.title">Connect your Grok subscription</h2>
+          <p id="oauth-intro" class="muted" data-i18n="oauth.intro">Sign in on Grok. No API Key or local setup needed.</p>
+          <button id="oauth-login" class="primary" type="button" data-i18n="oauth.login">Sign in to Grok</button>
+          <div id="oauth-device" hidden>
+            <p class="muted" data-i18n="onboarding.oauthHelp"></p>
+            <div class="code-row"><code id="oauth-code" class="code" dir="ltr"></code><button id="oauth-copy" type="button" data-i18n="oauth.copyCode">Copy code</button></div>
+            <p class="links"><a id="oauth-official" target="_blank" rel="noopener noreferrer" data-i18n="oauth.openOfficial">Reopen official authorization page</a><button id="oauth-cancel" class="text-button" type="button" data-i18n="oauth.cancel">Cancel sign-in</button></p>
+          </div>
+          <p id="oauth-state" class="muted" role="status" aria-live="polite"></p>
+          <p id="oauth-connected" class="connected" hidden><span class="dot" aria-hidden="true"></span><span data-i18n="oauth.connected">Connected to Grok.</span></p>
+          <div id="oauth-model-field" hidden>
+            <label for="oauth-model" data-i18n="options.model">Model</label>
+            <select id="oauth-model" dir="ltr" aria-describedby="oauth-model-help"></select>
+            <p id="oauth-model-help" class="muted"></p>
+          </div>
+          <p id="oauth-catalog" class="links" hidden><span id="oauth-catalog-state" class="muted" role="status" aria-live="polite"></span> <button id="oauth-refresh-models" class="text-button" type="button" data-i18n="oauth.refreshModels">Refresh available models</button></p>
+        </div>
+        <div id="auth-key">
+          <h2 id="key-heading" data-i18n="onboarding.authKeyTitle">Paste your API Key</h2>
+          <div class="segmented" role="radiogroup" aria-labelledby="key-heading">
+            <label><input id="key-api" name="key-kind" type="radio" value="api"><span>Grok (xAI)</span></label>
+            <label><input id="key-claude" name="key-kind" type="radio" value="claude"><span>Claude (Anthropic)</span></label>
+          </div>
+          <div id="key-entry">
+            <input id="key" class="key-input" type="password" maxlength="500" autocomplete="off" spellcheck="false" dir="ltr" aria-describedby="key-error key-privacy">
+            <p id="key-error" class="error" role="alert"></p>
+            <p><a id="key-link" target="_blank" rel="noopener noreferrer"></a></p>
+          </div>
+          <p id="key-saved" class="connected" hidden><span class="dot" aria-hidden="true"></span><span data-i18n="onboarding.keySaved">Key saved. SuperX will use it on your next fact check.</span> <button id="key-replace" class="text-button" type="button" data-i18n="onboarding.replaceKey">Replace Key</button></p>
+          <p id="key-privacy" class="muted"></p>
+        </div>
+      </section>
+      <fieldset id="step-usage" hidden>
+        <legend><h2 data-i18n="onboarding.usageTitle">When should SuperX fact-check?</h2></legend>
+        <label class="choice"><input id="usage-click" name="usage" type="radio" value="click"><span><strong data-i18n="onboarding.clickTitle">Only when I click</strong><span class="muted" data-i18n="onboarding.clickBody"></span></span></label>
+        <label class="choice"><input id="usage-auto" name="usage" type="radio" value="auto"><span><strong data-i18n="onboarding.autoTitle">Automatically</strong><span id="usage-auto-body" class="muted"></span></span></label>
+        <div id="budget-field" hidden>
+          <label for="budget" data-i18n="claude.budget">Spending limit per cycle (USD)</label>
+          <input id="budget" type="number" min="0" max="100000" step="1" dir="ltr" aria-describedby="budget-help">
+          <p id="budget-help" class="muted" data-i18n="claude.budgetHelp"></p>
+        </div>
+      </fieldset>
+      <p id="status" class="error" role="status" aria-live="polite"></p>
+      <div id="actions" class="actions"><button id="back" type="button" data-i18n="onboarding.back">Back</button><button id="next" class="primary" type="submit"></button></div>
+    </form>
+    <section id="done" hidden>
+      <span class="symbol" aria-hidden="true"></span>
+      <h1 data-i18n="onboarding.doneTitle">You're all set</h1>
+      <p class="muted" data-i18n="onboarding.doneBody">On X, look for the SuperX button at the top right of each post.</p>
+      <div class="actions"><button id="open-x" class="primary" type="button" data-i18n="onboarding.openX">Open X</button><button id="more-settings" type="button" data-i18n="onboarding.moreSettings">More settings</button></div>
+    </section>
+  </main><script src="provider-registry.js"></script><script src="feed-core.js"></script><script src="ui-i18n.js"></script><script src="onboarding.js"></script>
+</body></html>
