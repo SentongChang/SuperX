@@ -4900,6 +4900,19 @@ test('a missing post button is reported only when the button is in use',()=>{
   assert.equal(page.layoutMessages()[0].report.code,'actions');
 });
 
+test('the layout notice is the first rail card: answers start below it, not under it',()=>{
+  const page=layoutPage();page.configure();page.intersect();page.tick();
+  const card=page.cards()[0];assert.ok(card);assert.equal(card.hidden,false);
+  const before=card.getBoundingClientRect().top;
+  page.probeLayout(5);const notice=page.notice();assert.equal(notice.hidden,false);
+  const noticeBottom=Number.parseFloat(notice.style.top)+notice.offsetHeight;
+  const box=card.testShadow.querySelector('.card');assert.ok(box);
+  const visibleTop=card.getBoundingClientRect().top+Number.parseFloat(box.style.top||'0');
+  assert.equal(card.hidden,false);assert.ok(visibleTop>=noticeBottom,`answer content (${visibleTop}) starts below the notice (${noticeBottom})`);
+  notice.querySelector('.layout-dismiss').emit('click');page.flush();
+  assert.equal(card.hidden,false);assert.equal(card.getBoundingClientRect().top,before,'dismissing gives the space back');
+});
+
 test('dismissing the layout notice hides it for this extension version in every tab',()=>{
   const page=layoutPage();page.configure();page.probeLayout(5);
   page.notice().querySelector('.layout-dismiss').emit('click');page.flush();

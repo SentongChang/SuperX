@@ -11,7 +11,7 @@
   };
   const OAUTH_WAITING={authorizing:'oauth.authorizing',restoring:'oauth.restoring',refreshing:'oauth.refreshing'};
   let locale='en',settings=Core.normalizeSettings(Core.DEFAULT_SETTINGS),config={},oauth=oauthView();
-  let loaded=false,busy=false,step=0,connect='oauth',keyKind='api',replacingKey=false,usage='',chosenModel='',status='',keyError='',pollTimer;
+  let loaded=false,busy=false,step=0,connect='oauth',keyKind='api',replacingKey=false,usage='',usagePicked=false,chosenModel='',status='',keyError='',pollTimer;
   const t=(key,vars)=>UI.t(key,locale,vars);
 
   async function send(message){
@@ -23,13 +23,13 @@
     const state={starting:'authorizing',awaiting_authorization:'authorizing'}[raw?.state]||raw?.state||'idle',connected=raw?.connected===true;
     const code=raw?.device?.userCode,url=Core.officialOAuthURL(raw?.device?.verificationUriComplete);
     const models=connected&&Array.isArray(raw.catalogModels)?raw.catalogModels.flatMap(entry=>{const id=typeof entry==='string'?entry:entry?.id;return typeof id==='string'&&entry?.available!==false?[id]:[];}):[];
-    return {state,connected,models,errorKey:raw?.errorCode?Core.oauthErrorKey(raw.errorCode):'',
+    return {state,connected,models,catalogError:connected&&Boolean(raw?.catalogErrorCode),errorKey:raw?.errorCode?Core.oauthErrorKey(raw.errorCode):'',
       device:state==='authorizing'&&typeof code==='string'&&/^[A-Za-z0-9-]{3,32}$/.test(code)&&url?{code,url}:null};
   }
   function applyConfig(result){config=result;settings=Core.normalizeSettings(result.settings);oauth=oauthView(result.oauthStatus);}
   async function refreshConfig(){applyConfig(await send({type:'GET_CONFIG'}));}
-  // Only an explicit choice is preselected; custom or paused triggers stay as
-  // they are unless the user picks one of the two styles.
+  // Only an explicit choice is preselected; saved triggers stay as they are
+  // unless the user picks one of the two styles (see usagePicked).
   function savedUsage(value){
     const mode=Core.triggerMode(value);
     if(mode==='paused')return '';
@@ -55,7 +55,11 @@
     if(oauth.device)$('oauth-official').setAttribute('href',oauth.device.url);else $('oauth-official').removeAttribute('href');
     $('oauth-state').textContent=oauth.connected?'':waiting?t(waiting):oauth.errorKey?t(oauth.errorKey):'';
     $('oauth-connected').hidden=!oauth.connected;
-    const unavailable=oauth.connected&&!oauth.models.includes(settings.oauthModel);
+    // With no model list yet (still loading, or the catalog failed) there is
+    // nothing to choose from: offer a refresh instead of an empty picker.
+    const empty=oauth.connected&&!oauth.models.length,unavailable=oauth.connected&&!empty&&!oauth.models.includes(settings.oauthModel);
+    $('oauth-catalog').hidden=!empty;$('oauth-refresh-models').disabled=busy;
+    $('oauth-catalog-state').textContent=empty&&oauth.catalogError?t('oauth.catalogConnected'):'';
     $('oauth-model-field').hidden=!unavailable;
     if(unavailable){
       const select=$('oauth-model'),choices=Core.API_MODELS.filter(item=>oauth.models.includes(item.value));
@@ -107,7 +111,7 @@
     try{
       const result=await chrome.runtime.sendMessage({type,...values});
       if(result?.oauthStatus)oauth=oauthView(result.oauthStatus);
-      if(!result?.ok)status=Core.oauthErrorKey(result?.errorCode||result?.oauthStatus?.errorCode);
+      if(!result?.ok&&!(type==='OAUTH_REFRESH_CATALOG'&&result?.oauthStatus?.catalogErrorCode))status=Core.oauthErrorKey(result?.errorCode||result?.oauthStatus?.errorCode);
     }catch{status='oauth.unavailable';}
     finally{busy=false;render();schedulePoll();}
   }
@@ -124,12 +128,13 @@
     if(!raw){await useProvider(keyKind);return true;}
     if(!kind.valid(raw)){keyError=kind.invalid;return false;}
     const next={...settings,provider:keyKind};
-    await send(keyKind==='api'?{type:'SAVE_KEY',apiKey:raw,remember:true,settings:next,triggerPreferencesChanged:false}:{type:'SAVE_CLAUDE_KEY',apiKey:raw,settings:next,triggerPreferencesChanged:false});
+    // No `remember`: the worker keeps the user's saved choice for the key.
+    await send(keyKind==='api'?{type:'SAVE_KEY',apiKey:raw,settings:next,triggerPreferencesChanged:false}:{type:'SAVE_CLAUDE_KEY',apiKey:raw,settings:next,triggerPreferencesChanged:false});
     $('key').value='';replacingKey=false;return true;
   }
   async function finish(){
     await refreshConfig();
-    if(usage){
+    if(usage&&usagePicked){
       const claude=settings.provider==='claude';
       const next=usage==='click'
         ?{...settings,triggerMode:'custom',enabled:true,customTriggers:{...settings.customTriggers,...Core.CLICK_ONLY_TRIGGERS},...(claude?{claudeAutoTrigger:false}:{})}
@@ -159,12 +164,13 @@
   $('back').addEventListener('click',()=>{if(busy||step===0)return;if(step===1)cancelPendingLogin();step--;status='';keyError='';render();schedulePoll();});
   for(const id of ['connect-oauth','connect-key'])$(id).addEventListener('change',()=>{if($(id).checked){connect=$(id).value;render();}});
   for(const id of ['key-api','key-claude'])$(id).addEventListener('change',()=>{if($(id).checked){keyKind=$(id).value;keyError='';render();}});
-  for(const id of ['usage-click','usage-auto'])$(id).addEventListener('change',()=>{if($(id).checked){usage=$(id).value;render();}});
+  for(const id of ['usage-click','usage-auto'])$(id).addEventListener('change',()=>{if($(id).checked){usage=$(id).value;usagePicked=true;render();}});
   $('key').addEventListener('input',()=>{keyError='';render();});
   $('budget').addEventListener('input',()=>render());
   $('oauth-model').addEventListener('change',()=>{chosenModel=$('oauth-model').value;render();});
   $('key-replace').addEventListener('click',()=>{replacingKey=true;render();$('key').focus();});
-  $('oauth-login').addEventListener('click',()=>oauthAction('OAUTH_LOGIN',{remember:true}));
+  $('oauth-login').addEventListener('click',()=>oauthAction('OAUTH_LOGIN'));
+  $('oauth-refresh-models').addEventListener('click',()=>oauthAction('OAUTH_REFRESH_CATALOG'));
   $('oauth-cancel').addEventListener('click',()=>oauthAction('OAUTH_CANCEL_LOGIN'));
   $('oauth-copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(oauth.device?.code||'');status='';}catch{status='common.copyFailed';}render();});
   $('skip').addEventListener('click',async()=>{cancelPendingLogin();await record('dismissed');await chrome.runtime.openOptionsPage();});

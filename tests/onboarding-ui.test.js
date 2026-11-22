@@ -73,7 +73,7 @@ test('signing in with Grok sends the existing OAuth messages and enables Continu
   const f=fixture({settings:{provider:'oauth'}});await settle();await f.next();
   assert.equal(f.visible(),'step-auth');assert.equal(f.$('progress').textContent,'Step 2 of 3');assert.equal(f.$('next').disabled,true);
   await f.$('oauth-login').listeners.click();await settle();
-  assert.deepEqual(f.sent('OAUTH_LOGIN'),[{type:'OAUTH_LOGIN',remember:true}]);
+  assert.deepEqual(f.sent('OAUTH_LOGIN'),[{type:'OAUTH_LOGIN'}],'the worker keeps the saved "remember sign-in" choice');
   assert.equal(f.$('oauth-device').hidden,false);assert.equal(f.$('oauth-code').textContent,'DEMO-1234');
   assert.equal(f.$('oauth-official').getAttribute('href'),'https://accounts.x.ai/oauth2/device?user_code=DEMO-1234');
   assert.equal(f.$('oauth-state').textContent,UI.t('oauth.authorizing','en'));assert.equal(f.$('oauth-login').hidden,true);
@@ -115,7 +115,7 @@ test('a pasted Key goes through SAVE_KEY or SAVE_CLAUDE_KEY and invalid input se
   assert.equal(f.$('next').disabled,true);
   f.$('key').value='  xai-fixture-key  ';f.$('key').listeners.input();await f.next();
   const [grok]=f.sent('SAVE_KEY');
-  assert.equal(grok.apiKey,'xai-fixture-key');assert.equal(grok.remember,true);assert.equal(grok.settings.provider,'api');assert.equal(grok.triggerPreferencesChanged,false);
+  assert.equal(grok.apiKey,'xai-fixture-key');assert.equal(Object.hasOwn(grok,'remember'),false,'the worker keeps the saved "remember Key" choice');assert.equal(grok.settings.provider,'api');assert.equal(grok.triggerPreferencesChanged,false);
   assert.equal(f.$('key').value,'');assert.equal(f.visible(),'step-usage');
   f.$('back').listeners.click();await settle();
   assert.equal(f.$('key-saved').hidden,false);assert.equal(f.$('key-entry').hidden,true);assert.equal(f.$('next').disabled,false);
@@ -180,4 +180,33 @@ test('Skip records the dismissal and opens Settings; leaving mid sign-in cancels
   assert.equal(f.sent('SAVE_SETTINGS').length,0);
   const g=fixture();await settle();await g.next();await g.$('oauth-login').listeners.click();await settle();
   g.pageListeners.pagehide();await settle();assert.equal(g.sent('OAUTH_CANCEL_LOGIN').length,1);
+});
+
+test('pressing through a re-opened guide never rewrites saved triggers, even when click-only is preselected',async()=>{
+  const saved={provider:'claude',triggerMode:'automatic',claudeAutoTrigger:false};
+  const f=fixture({settings:saved,claudeConfigured:true});await settle();
+  assert.equal(f.$('usage-click').checked,true,'Claude without automatic checks shows as click-only');
+  await f.next();await f.next();assert.equal(f.visible(),'step-usage');
+  await f.next();
+  assert.equal(f.sent('SAVE_SETTINGS').length,0);assert.equal(f.settings().triggerMode,'automatic');assert.equal(f.local.onboarding.state,'done');
+  const g=fixture({settings:saved,claudeConfigured:true});await settle();await g.next();await g.next();
+  g.choose('usage-click');await g.next();
+  const [click]=g.sent('SAVE_SETTINGS');
+  assert.equal(click.triggerPreferencesChanged,true);assert.equal(Core.clickOnlyTriggers(click.settings),true,'an explicit pick is still saved');
+});
+
+test('a connected sign-in with no model list offers a refresh instead of an empty picker',async()=>{
+  let refreshed=0;
+  const f=fixture({settings:{provider:'oauth'},oauthStatus:{...connected([]),catalogErrorCode:'OAUTH_CATALOG_UNAVAILABLE'},
+    override:message=>message.type==='OAUTH_REFRESH_CATALOG'?(refreshed++,{ok:true,oauthStatus:connected(['grok-4.3'])}):null});
+  await settle();await f.next();
+  assert.equal(f.$('oauth-model-field').hidden,true,'no empty model select');
+  assert.equal(f.$('oauth-catalog').hidden,false);assert.equal(f.$('oauth-catalog-state').textContent,UI.t('oauth.catalogConnected','en'));
+  assert.notEqual(f.$('oauth-model-help').textContent,UI.t('oauth.modelUnavailable','en',{model:'grok-4.3'}));
+  assert.equal(f.$('next').disabled,true);
+  await f.$('oauth-refresh-models').listeners.click();await settle();
+  assert.equal(refreshed,1);assert.equal(f.$('oauth-catalog').hidden,true);assert.equal(f.$('next').disabled,false);
+  const loading=fixture({settings:{provider:'oauth'},oauthStatus:connected([])});await settle();await loading.next();
+  assert.equal(loading.$('oauth-catalog').hidden,false);assert.equal(loading.$('oauth-catalog-state').textContent,'','still loading: no error shown');
+  assert.equal(loading.$('oauth-model-field').hidden,true);
 });

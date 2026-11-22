@@ -272,6 +272,42 @@ test('opened pages join the sources after citations, and failed fetches add none
   assert.equal(sources.some(source=>source.url==='https://stats.example/'),false,'The cap of 20 still holds');
 });
 
+test('web_fetch is limited to the hosts of the post\'s own links', () => {
+  const request = api.buildRequest(linked,settings), links = core.fetchableLinks(linked);
+  const body = claude.messagesRequest(request,settings,{fetchable:links});
+  assert.deepEqual(body.tools[1],{type:'web_fetch_20250910',name:'web_fetch',max_uses:2,max_content_tokens:6000,citations:{enabled:true},
+    allowed_domains:['example.com','stats.example']});
+  assert.equal(Object.hasOwn(body.tools[1],'blocked_domains'),false,'the API takes one list or the other');
+  const odd = claude.messagesRequest(request,settings,{fetchable:['https://127.0.0.1/a','http://intranet/b','https://news.example/c','https://news.example/d']});
+  assert.deepEqual(odd.tools[1].allowed_domains,['news.example'],'IP addresses and single-label hosts are never sent');
+  assert.equal(odd.tools[1].max_uses,2);
+  assert.equal(claude.messagesRequest(request,settings,{fetchable:['https://127.0.0.1/a']}).tools.length,1,'nothing Claude may open, no web_fetch');
+  assert.equal(claude.messagesRequest(request,settings,{fetchable:[]}).tools.length,1);
+});
+
+test('only the post\'s own links count as opened; a page found through search does not', () => {
+  const links = core.fetchableLinks(linked);
+  const run = results => { const stream = claude.createStream({fetchable:links}); stream.begin(); for (const event of fetchTurn(results)) stream.ingest(event); return stream.fetchSummary(); };
+  assert.deepEqual(run([fetched('https://en.wikipedia.org/wiki/Report','Other')]),{attempted:1,succeeded:0});
+  assert.deepEqual(run([fetched('https://example.com/report#top','Report'),fetched('https://stats.example','Stats')]),{attempted:2,succeeded:2});
+  const redirected = fetched('https://www.example.com/final','Report');
+  const stream = claude.createStream({fetchable:links}); stream.begin();
+  for (const event of fetchTurn([redirected])) {
+    if (event.content_block?.type === 'server_tool_use') event.content_block.input.url = 'https://example.com/report';
+    stream.ingest(event);
+  }
+  assert.deepEqual(stream.fetchSummary(),{attempted:1,succeeded:1},'the requested link counts even when it redirects');
+});
+
+test('a check whose only fetch opened another page still reports the links gap', async () => {
+  const result = await api.run(linked,settings,KEY,{onUpdate(){},fetchImpl:async(url,request)=>{
+    const body = JSON.parse(request.body);
+    assert.deepEqual(body.tools[1].allowed_domains,['example.com','stats.example']);
+    return response(fetchTurn([fetched('https://elsewhere.example/page','Elsewhere')]));
+  }});
+  assert.deepEqual(result.gaps,['links','search']);
+});
+
 test('a check whose links all failed to open reports the links gap, and nothing about fetches is stored', async () => {
   const sent = [];
   const result = await api.run({...linked,textTruncated:true},settings,KEY,{onUpdate(){},fetchImpl:async(url,request)=>{

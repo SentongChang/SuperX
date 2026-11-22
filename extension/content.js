@@ -1212,7 +1212,11 @@
     for(const entry of entries.values())syncPostControl(entry);
     const header=headerGeometry(primary,viewport),headerHeight=header.top+header.height;
     // One calm notice at a time: a layout problem outranks the button hint.
-    if(placeLayoutNotice(bounds,headerHeight,viewport))hideTriggerGuide();else syncTriggerGuide(headerHeight);
+    const noticeShown=placeLayoutNotice(bounds,headerHeight,viewport);
+    if(noticeShown)hideTriggerGuide();else syncTriggerGuide(headerHeight);
+    // The notice is the rail's first card: answers start below it instead of
+    // being covered (and their buttons blocked) until it is dismissed.
+    const noticeHeight=noticeShown&&!collapsed?layoutNotice.offsetHeight:0,cardsTop=noticeHeight>0?headerHeight+12+noticeHeight+12:headerHeight;
     railHeader.dataset.compact=String(bounds.width<310);
     railHeader.style.borderBottomWidth=header.borderWidth+'px';
     for(const [element,geometry] of [[rail,bounds],[railHeader,{...bounds,top:header.top,height:header.height}],[railExpand,{left:bounds.left,top:header.top,width:32,height:header.height}]])for(const name of ['left','top','width','height']) {
@@ -1222,7 +1226,7 @@
     const extraLines=[],nativeArticles=[...geometryByArticle.keys()];
     for(const cell of nativeCells)extraLines.push(...postBoundarySeparators(cell,nativeCellSeparators(cell,primaryRect,viewport),nativeRows,nativeArticles));
     positionSeparators(nativeRows,bounds,viewport,headerHeight,extraLines);
-    for(const placement of Layout.placeRailRows(items,viewport,{headerHeight})) {
+    for(const placement of Layout.placeRailRows(items,viewport,{headerHeight:cardsTop})) {
       const entry=placement.id,card=entry.card;
       card.hidden=placement.hidden;
       if(placement.hidden)continue;

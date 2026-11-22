@@ -57,8 +57,23 @@
     const date = new Date(now);
     return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
   }
+  // Hostnames web_fetch may open: the post's own link hosts. The API takes
+  // plain DNS names only (no IPs or single-label names) and at most 64.
+  function fetchDomains(links) {
+    const hosts = [];
+    for (const link of links) {
+      let host = '';
+      try { host = new URL(link).hostname.toLowerCase(); } catch { continue; }
+      if (!host.includes('.') || /^[\d.]+$/.test(host) || host.startsWith('[') || hosts.includes(host)) continue;
+      hosts.push(host);
+    }
+    return hosts.slice(0, 64);
+  }
   // `request` is the Responses-shaped request from GrokFirstAPI.buildRequest.
-  // `fetchable` counts the post's own links Claude may open with web_fetch.
+  // `fetchable` is the list of the post's own links Claude may open with
+  // web_fetch (Core.fetchableLinks). web_fetch is then limited to their hosts
+  // with allowed_domains, so search results cannot spend the fetch budget on
+  // other sites. A bare count is still accepted and only blocks X itself.
   function messagesRequest(request, settings, {stage = 'verify', now = Date.now(), fetchable = 0} = {}) {
     // Auto resolves to the model the pre-screen chose for this job.
     const model = profile(Core.providerModel({...settings, provider: 'claude'}));
@@ -80,9 +95,14 @@
     if (!comments && wantsSearch(request?.tools)) {
       const maxUses = Math.min(10, Math.max(1, Math.trunc(Number(settings?.claudeMaxSearches)) || Core.DEFAULT_SETTINGS.claudeMaxSearches));
       body.tools = [{type: model.webSearchTool, name: 'web_search', max_uses: maxUses}];
-      // Fixed order, search then fetch, so each tool shape keeps one cache prefix.
-      if (fetchable > 0) body.tools.push({type: model.webFetchTool, name: 'web_fetch', max_uses: Math.min(WEB_FETCH.maxUses, fetchable),
-        max_content_tokens: WEB_FETCH.maxContentTokens, citations: {enabled: true}, blocked_domains: [...WEB_FETCH.blockedDomains]});
+      // Fixed order, search then fetch. allowed_domains and blocked_domains
+      // cannot be combined; the allowed hosts already exclude X and t.co.
+      const links = Array.isArray(fetchable) ? fetchable : null;
+      const domains = links ? fetchDomains(links) : null;
+      const count = links ? links.filter(link => { try { return domains.includes(new URL(link).hostname.toLowerCase()); } catch { return false; } }).length : Number(fetchable) || 0;
+      if (count > 0) body.tools.push({type: model.webFetchTool, name: 'web_fetch', max_uses: Math.min(WEB_FETCH.maxUses, count),
+        max_content_tokens: WEB_FETCH.maxContentTokens, citations: {enabled: true},
+        ...(domains ? {allowed_domains: domains} : {blocked_domains: [...WEB_FETCH.blockedDomains]})});
     }
     if (comments) body.output_config.format = {type: 'json_schema', schema: COMMENTS_SCHEMA};
     // Server-side refusal fallback is offered on Sonnet/Opus; Haiku has none.
@@ -161,7 +181,16 @@
 
   // Accumulates the content blocks of one assistant turn, including turns
   // resumed after `pause_turn`, so the request can be continued unchanged.
-  function createStream() {
+  function comparableUrl(value) {
+    const url = safeUrl(value);
+    if (!url) return null;
+    const parsed = new URL(url); parsed.hash = '';
+    return parsed.href.replace(/\/$/, '');
+  }
+  // `fetchable` (Core.fetchableLinks) lets the fetch summary count only the
+  // post's own links as opened; a page found through search does not count.
+  function createStream({fetchable} = {}) {
+    const ownLinks = Array.isArray(fetchable) ? new Set(fetchable.map(comparableUrl).filter(Boolean)) : null;
     const blocks = [], usages = [];
     let offset = 0, lastTool = -1, model = '', stopReason = null, searched = false, error = null, done = false, usage = null;
     function begin() { offset = blocks.length; usage = {}; usages.push(usage); done = false; stopReason = null; error = null; }
@@ -231,7 +260,11 @@
     function fetchResults() { return blocks.filter(block => block?.type === 'web_fetch_tool_result'); }
     function fetchSummary() {
       const results = fetchResults();
-      return {attempted: results.length, succeeded: results.filter(block => block.content?.type === 'web_fetch_result').length};
+      // The requested URL is matched as well as the result URL, so a link
+      // that redirects still counts as the post's own link.
+      const requested = id => blocks.find(block => block?.type === 'server_tool_use' && block.id === id)?.input?.url;
+      const own = block => !ownLinks || [requested(block.tool_use_id), block.content?.url].some(url => ownLinks.has(comparableUrl(url)));
+      return {attempted: results.length, succeeded: results.filter(block => block.content?.type === 'web_fetch_result' && own(block)).length};
     }
     // Cited pages first. A fetched page's citations may carry no URL, so every
     // opened page is listed after them.

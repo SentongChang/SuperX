@@ -371,6 +371,7 @@ function rememberHistoryResult(ticket,result,comments=false,language=''){
   }).then(()=>notifyHistoryChanged()).catch(()=>{});
 }
 async function broadcastConfig() {
+  void settleOnboarding();
   const config=await publicConfig();
   for(const client of clients)send(client.port,{type:'CONFIG',...config,used:quotas[client.tabId]||0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});
   void chrome.runtime.sendMessage({type:'CONFIG',...config,oauthStatus:oauth.status()}).catch(()=>{});
@@ -800,6 +801,18 @@ async function openSettings(focus,setupEntry=false) {
 }
 async function onboardingPending(){
   try{return (await chrome.storage.local.get('onboarding')).onboarding?.state==='pending';}catch{return false;}
+}
+// A pending guide is finished once any connection is ready, however it was
+// made (the guide, Settings or the popup). Losing readiness later must lead
+// to Settings, never back to the first-run guide.
+let onboardingSettled=false;
+async function settleOnboarding(){
+  if(onboardingSettled||!providerAllowsCalls())return;
+  onboardingSettled=true;
+  try{
+    const record=(await chrome.storage.local.get('onboarding')).onboarding;
+    if(record?.state==='pending')await chrome.storage.local.set({onboarding:{...record,state:'done',at:Date.now()}});
+  }catch{onboardingSettled=false;}
 }
 async function openOnboarding(){await chrome.tabs.create({url:chrome.runtime.getURL('onboarding.html')});}
 // A fresh install starts with "Only when I click" and opens the setup guide.
@@ -1565,6 +1578,7 @@ chrome.alarms?.onAlarm.addListener(alarm=>{
   }
 });
 chrome.runtime.onStartup?.addListener(()=>{void ready.then(()=>oauthReady).catch(()=>{});});
+void ready.then(()=>settleOnboarding()).catch(()=>{});
 chrome.runtime.onInstalled?.addListener(details=>{
   if(['install','update'].includes(details?.reason))void ready.then(()=>startOnboarding(details.reason)).catch(()=>{});
 });

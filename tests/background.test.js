@@ -4704,6 +4704,28 @@ test('onboarding: rail and popup Settings lead to the guide only while it is pen
   assert.equal((await ready.message({type:'OPEN_SETTINGS'},popup)).ok,true);assert.equal(opened.at(-1),'ready');assert.equal(ready.createdTabs.length,0);
 });
 
+test('onboarding: connecting anywhere finishes a pending guide, so a later lost connection leads to Settings',async()=>{
+  const popup={id:'grokfirst-test',url:onboardingURL.replace('onboarding','popup')};
+  const opened=[];const bg=freshProfile({},{openOptionsPage:()=>opened.push('options')});await installEvent(bg,'install');
+  assert.equal(bg.local.data.onboarding.state,'pending');
+  assert.equal((await bg.message({type:'SAVE_KEY',apiKey:'xai-settings-key',settings:{...bg.local.data.settings,provider:'api'},triggerPreferencesChanged:false})).ok,true);
+  await until(()=>bg.local.data.onboarding.state==='done');
+  assert.equal(bg.local.data.onboarding.version,1);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,provider:'build'},triggerPreferencesChanged:false})).ok,true);
+  assert.equal((await bg.message({type:'GET_CONFIG'})).ready,false);
+  assert.equal((await bg.message({type:'OPEN_SETTINGS'},popup)).ok,true);
+  assert.deepEqual(opened,['options']);assert.equal(bg.createdTabs.length,1,'only the first-run guide tab');
+});
+
+test('onboarding: a Key saved from the guide keeps a saved "do not remember" choice',async()=>{
+  const guide={id:'grokfirst-test',url:onboardingURL};
+  const settings=core.normalizeSettings({provider:'api'});
+  const bg=createBackground({local:{settings,rememberApiKey:false}});await bg.ready();
+  assert.equal((await bg.message({type:'SAVE_KEY',apiKey:'xai-session-only',settings,triggerPreferencesChanged:false},guide)).ok,true);
+  assert.equal(bg.local.data.rememberApiKey,false);assert.equal(bg.local.data.apiKeyEncrypted,undefined);
+  assert.equal(bg.session.data.apiKey,'xai-session-only');
+});
+
 test('onboarding: the guide page is trusted UI and connecting keeps the click-only seed',async()=>{
   const guide={id:'grokfirst-test',url:onboardingURL};
   const bg=freshProfile();await installEvent(bg,'install');

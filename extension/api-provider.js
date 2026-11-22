@@ -914,8 +914,9 @@
     if(!apiKey)throw apiError('请在设置中填写 Claude API Key。','NEEDS_KEY');
     const secrets=[apiKey],containsSecret=value=>typeof value==='string'&&value.includes(apiKey);
     const triage=stage==='triage',request=triage?{}:buildRequest(post,settings,stage,analysis),redaction=diagnosticRedaction(post,settings,analysis,secrets,request);
-    const body=triage?Claude.triageRequest(post):Claude.messagesRequest(request,settings,{stage,fetchable:Core.fetchableLinks(post).length});
-    const stream=Claude.createStream();
+    const fetchable=triage?[]:Core.fetchableLinks(post);
+    const body=triage?Claude.triageRequest(post):Claude.messagesRequest(request,settings,{stage,fetchable});
+    const stream=Claude.createStream({fetchable});
     const startedAt=Date.now(),diagnostic={failureOrigin:'network',startedAt,requestedModel:diagnosticModel(body.model),requestedEffort:body.output_config.effort};
     let text='',usage={},model=body.model,usageCompleteFlag=false;
     const snapshot=()=>{usage=sanitizedUsage(stream.usage(body.model));const actual=sanitizedModel(stream.model());if(actual&&!containsSecret(actual)){model=actual;diagnostic.model=diagnosticModel(actual);}usageCompleteFlag=stream.usageComplete();};
