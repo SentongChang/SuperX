@@ -4733,3 +4733,57 @@ test('a partial answer keeps its verdict and gaps while the retry waits',()=>{
   assert.equal(row.textContent,'InaccuratePartial check · No search');
   assert.match(card.testShadow.querySelector('.status').textContent,/Fact check incomplete/);
 });
+
+test('finished answers label their sources by publisher type without decorating inline links',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources'),answer=card.testShadow.querySelector('.answer');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'The figure matches [the wire report](https://www.reuters.com/world/a "Wire copy").',
+    sources:[{url:'https://www.reuters.com/world/a',title:'1'},{url:'https://x.com/someone/status/2',title:'A reply'},{url:'https://x.com/test/status/100',title:'The checked post'}]}});page.flush();
+  const mix=sources.querySelector('.source-mix');
+  assert.equal(mix.textContent,'Sources: News 1 · Social 1','The checked post is listed but not counted');
+  assert.equal(mix.title,"Labels come from the web address only; they don't rate the page itself.");
+  assert.equal(sources.querySelector('.source-weak'),null);
+  const rows=sources.querySelectorAll('.source-row');
+  assert.deepEqual(rows.map(row=>row.querySelector('.tier').textContent),['Social','Social']);
+  assert.deepEqual(rows.map(row=>row.querySelector('a').href),['https://x.com/someone/status/2','https://x.com/test/status/100']);
+  assert.equal(rows[0].querySelector('.tier').className,'tier tier-social');
+  const inline=answer.querySelector('a');
+  assert.equal(inline.dataset.sourceTier,'news');assert.equal(inline.title,'Wire copy\nNews · reuters.com');
+  assert.equal(inline.className||'','','Inline links get no visible badge');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(sources.querySelector('.source-mix').textContent,'来源：新闻 1 · 社交媒体 1');
+  assert.equal(sources.querySelector('.tier').textContent,'社交媒体');
+  assert.equal(inline.title,'Wire copy\n新闻 · reuters.com','Relabelling keeps the authored title once');
+});
+
+test('only social, reference or other sources add one calm missing-source line',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'Only posts discuss it.',sources:[{url:'https://x.com/a/status/3',title:'Post'},{url:'https://en.wikipedia.org/wiki/X',title:'Wiki'}]}});page.flush();
+  const mix=sources.querySelector('.source-mix');
+  assert.equal(mix.textContent,'Sources: Reference 1 · Social 1No official, academic or news source cited');
+  assert.equal(mix.querySelector('.source-weak').textContent,'No official, academic or news source cited');
+  const style=card.testShadow.querySelector('style').textContent;
+  assert.match(style,/\.source-weak\{display:block;margin-top:2px;color:var\(--gf-fg,#e7e9ea\)\}/);
+  assert.match(style,/\.tier\{[^}]*border:1px solid color-mix\(in srgb,var\(--gf-muted,#71767b\) 45%,transparent\)/);
+  assert.doesNotMatch(style,/\.tier\{[^}]*background/,'Chips are outlined, never filled');
+});
+
+test('the source mix waits for the end of a run and clears on retry',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources'),send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  send({type:'START'});send({type:'UPDATE',phase:'verify',text:'Still checking.',verdict:null,sources:[{url:'https://apnews.com/a',title:'AP'}]});
+  assert.equal(sources.querySelector('.source-mix'),null,'No counts while streaming');
+  assert.equal(sources.querySelector('.tier').textContent,'News','Chips can appear while streaming');
+  send({type:'RESULT',result:{provider:'api',text:'Checked.',sources:[{url:'https://apnews.com/a',title:'AP'}]}});
+  assert.equal(sources.querySelector('.source-mix').textContent,'Sources: News 1');
+  card.testShadow.querySelector('.retry').emit('click');page.flush();
+  assert.equal(sources.querySelector('.source-mix'),null);assert.equal(sources.childNodes.length,0);
+});
+
+test('a kept partial answer shows its source mix, and an answer without sources shows none',()=>{
+  const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources');
+  page.port.onMessage.emit({type:'START',requestId:request.requestId});
+  retryWait(page,request,{code:'API_INCOMPLETE',partialResult:{provider:'api',text:'The value is lower.',verificationStatus:'incomplete',sources:[{url:'https://www.cdc.gov/a',title:'CDC'}]}});
+  assert.equal(sources.querySelector('.source-mix').textContent,'Sources: Official 1');
+  const other=verdictFixture();
+  other.page.port.onMessage.emit({type:'RESULT',requestId:other.request.requestId,result:{provider:'api',text:'From memory only.',sources:[]}});other.page.flush();
+  assert.equal(other.card.testShadow.querySelector('.sources').childNodes.length,0);
+});

@@ -2099,6 +2099,20 @@
     "ru": ["Верно", "Неверно", "Частично верно", "Недостаточно данных", "Нет проверяемого утверждения", "Результат проверки: {verdict}", "Неполная проверка", "Неполная проверка: {gaps}", "Текст прочитан не полностью", "Изображения не прочитаны", "Видео не просмотрено", "Без поиска", "Прочитана только видимая часть публикации; текст за «Показать ещё» не учтён.", "Как минимум одно изображение было недоступно модели.", "От видео был доступен только один кадр.", "Поиск не выполнялся, поэтому ответ опирается только на собственные знания модели."],
     "hi": ["सही", "गलत", "आंशिक रूप से सही", "पर्याप्त प्रमाण नहीं", "जाँचने योग्य दावा नहीं", "तथ्य जाँच का नतीजा: {verdict}", "अधूरी जाँच", "अधूरी जाँच: {gaps}", "पूरा पाठ नहीं पढ़ा", "चित्र नहीं पढ़े", "वीडियो नहीं देखा", "खोज नहीं हुई", "पोस्ट का केवल दिखने वाला हिस्सा पढ़ा गया; “और दिखाएँ” के बाद का पाठ शामिल नहीं है।", "कम से कम एक चित्र मॉडल को उपलब्ध नहीं था।", "वीडियो का केवल एक स्थिर फ़्रेम उपलब्ध था।", "कोई खोज नहीं हुई, इसलिए यह उत्तर केवल मॉडल के अपने ज्ञान पर आधारित है।"]
   });
+  section(["source.summary", "source.official", "source.academic", "source.news", "source.reference", "source.social", "source.other", "source.weak", "source.hint"], {
+    "en": ["Sources: {list}", "Official", "Academic", "News", "Reference", "Social", "Other", "No official, academic or news source cited", "Labels come from the web address only; they don't rate the page itself."],
+    "zh-CN": ["来源：{list}", "官方", "学术", "新闻", "参考资料", "社交媒体", "其他", "未引用官方、学术或新闻来源", "标签仅根据网址判断，并不评价页面内容。"],
+    "zh-TW": ["來源：{list}", "官方", "學術", "新聞", "參考資料", "社群媒體", "其他", "未引用官方、學術或新聞來源", "標籤僅依網址判斷，並不評價頁面內容。"],
+    "ja": ["出典：{list}", "公的機関", "学術", "報道", "参考資料", "SNS", "その他", "公的機関・学術・報道の出典がありません", "ラベルはURLのみから判定しており、ページ内容の評価ではありません。"],
+    "ko": ["출처: {list}", "공공기관", "학술", "언론", "참고자료", "소셜", "기타", "공공기관·학술·언론 출처가 인용되지 않았습니다", "라벨은 웹 주소만으로 정해지며 페이지 내용을 평가하지 않습니다."],
+    "es": ["Fuentes: {list}", "Oficial", "Académica", "Prensa", "Referencia", "Redes sociales", "Otra", "No se cita ninguna fuente oficial, académica ni de prensa", "Las etiquetas se basan solo en la dirección web; no valoran la página."],
+    "fr": ["Sources : {list}", "Officielle", "Académique", "Presse", "Référence", "Réseaux sociaux", "Autre", "Aucune source officielle, académique ou de presse citée", "Les étiquettes reposent uniquement sur l’adresse web ; elles n’évaluent pas la page."],
+    "de": ["Quellen: {list}", "Amtlich", "Wissenschaft", "Presse", "Nachschlagewerk", "Soziale Medien", "Sonstige", "Keine amtliche, wissenschaftliche oder Presse-Quelle zitiert", "Die Kennzeichnung beruht nur auf der Webadresse und bewertet nicht die Seite selbst."],
+    "pt": ["Fontes: {list}", "Oficial", "Acadêmica", "Imprensa", "Referência", "Redes sociais", "Outra", "Nenhuma fonte oficial, acadêmica ou de imprensa citada", "Os rótulos vêm apenas do endereço web; não avaliam a página."],
+    "ar": ["المصادر: {list}", "رسمي", "أكاديمي", "أخبار", "مرجع", "تواصل اجتماعي", "أخرى", "لم يُستشهد بأي مصدر رسمي أو أكاديمي أو إخباري", "تعتمد التسميات على عنوان الويب فقط ولا تقيّم الصفحة نفسها."],
+    "ru": ["Источники: {list}", "Официальный", "Научный", "СМИ", "Справочник", "Соцсети", "Другое", "Нет ссылок на официальные, научные или новостные источники", "Метки определяются только по веб-адресу и не оценивают саму страницу."],
+    "hi": ["स्रोत: {list}", "आधिकारिक", "अकादमिक", "समाचार", "संदर्भ", "सोशल मीडिया", "अन्य", "कोई आधिकारिक, अकादमिक या समाचार स्रोत उद्धृत नहीं", "लेबल केवल वेब पते से तय होते हैं; ये पेज का मूल्यांकन नहीं करते।"]
+  });
   const aliases = {'common.auto':'lang.auto','common.failed':'status.failed','tooltip.collapse':'common.collapse','tooltip.expand':'common.expand','build.imageUnavailable':'draft.imageUnavailable','build.imageLimit':'error.mediaLimit'};
   for (const language of SUPPORTED_LANGUAGES) {
     for (const [key, source] of Object.entries(aliases)) catalog[language][key] = catalog[language][source];

@@ -354,3 +354,16 @@ test('verdict and gap labels exist in every language with matching placeholders 
   for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
   assert.equal(ui.t('verdict.unproven','en'),'Not enough evidence');assert.equal(ui.t('gaps.label','zh-CN'),'核查不完整');
 });
+
+test('source-quality labels exist in every language with the {list} placeholder and no English "verify" wording',()=>{
+  const sources=require('../extension/source-quality.js');
+  const keys=['source.summary',...sources.TIERS.map(tier=>'source.'+tier),'source.weak','source.hint'];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]);
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.deepEqual(placeholders(value),key==='source.summary'?['list']:[],`${language}: ${key} placeholders`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('source.summary','fr',{list:'Presse 1'}),'Sources : Presse 1');assert.equal(ui.t('source.social','zh-CN'),'社交媒体');
+});

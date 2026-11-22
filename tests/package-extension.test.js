@@ -254,3 +254,13 @@ test('output cannot contaminate production extension files', async t => {
   const { packageExtension } = await packager;
   await assert.rejects(packageExtension({ root, outputDir: join(root, 'extension', 'build') }), /outside the extension/);
 });
+
+test('source-quality.js ships and loads after x-dom.js and before feed-core.js wherever feed-core reads it',async()=>{
+  const {PRODUCTION_FILES}=await packager;assert.ok(PRODUCTION_FILES.includes('source-quality.js'));
+  const manifest=JSON.parse(await readFile(join(sourceRoot,'extension','manifest.json'),'utf8'));
+  const scripts=manifest.content_scripts[0].js;
+  assert.deepEqual(scripts.slice(0,3),['x-dom.js','source-quality.js','feed-core.js']);
+  const page=await readFile(join(sourceRoot,'extension','history.html'),'utf8');
+  const order=[...page.matchAll(/<script src="([^"]+)"/g)].map(match=>match[1]);
+  assert.ok(order.indexOf('source-quality.js')>=0&&order.indexOf('source-quality.js')<order.indexOf('feed-core.js'),order.join(','));
+});

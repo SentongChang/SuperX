@@ -96,6 +96,10 @@ h2 { margin: 0; font-size: 20px; line-height: 1.4; }
 .answer-markdown th, .answer-markdown td { min-width: 0; padding: 6px 9px; border: 1px solid var(--line); }
 .answer-markdown hr, .fact-check-divider { height: 1px; border: 0; background: var(--line); margin: 18px 0; }
 .answer-sources { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 16px; font-size: 13px; line-height: 1.5; }
+.source-mix { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.source-weak { display: block; color: var(--foreground); }
+.source-row { display: flex; align-items: baseline; gap: 6px; max-width: 100%; min-width: 0; }
+.tier { flex: none; padding: 0 5px; border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent); border-radius: 4px; color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
 .comments-heading { margin: 20px 0 10px; font-size: 15px; line-height: 1.5; }
 .comment-copy { display: block; width: 100%; padding: 12px 0; border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--foreground); text-align: start; font-size: 14px; line-height: 1.55; white-space: pre-wrap; unicode-bidi: plaintext; }
 .comment-copy:hover { background: var(--hover); }

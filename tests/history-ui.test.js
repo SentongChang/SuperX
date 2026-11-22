@@ -344,3 +344,32 @@ test('a changed verdict re-renders a saved answer and invalid values render noth
   page.setSnapshot(snapshot([post('1',{analysis:{text:'Same answer',sources:[],verdict:'sure',gaps:['smell']}})]));await page.controller.refresh({forceList:false});
   assert.equal(row().hidden,true);assert.equal(row().textContent,'');
 });
+
+test('history labels footer sources, counts every cited page and relabels on a language change',async () => {
+  const page = fixture({entries:[post('1',{analysis:{text:'See [the wire](https://www.reuters.com/a).',sources:[{url:'https://www.reuters.com/a',title:'1'},{url:'https://x.com/someone/status/2',title:'A reply'},{url:'https://x.com/test/status/1/photo/1',title:'The post'}]}})]});
+  await page.controller.start();const details = await page.openFirstAnswer();
+  const block = nodes(details,'div').find(node => node.className === 'answer-sources');
+  const mix = block.childNodes[0];
+  assert.equal(mix.className,'source-mix');assert.equal(mix.textContent,'Sources: News 1 · Social 1');
+  assert.equal(mix.title,"Labels come from the web address only; they don't rate the page itself.");
+  const chips = nodes(block,'span').filter(node => node.className.startsWith('tier '));
+  assert.deepEqual(chips.map(node => [node.className,node.textContent]),[['tier tier-social','Social'],['tier tier-social','Social']]);
+  const inline = nodes(details,'a').find(node => node.href === 'https://www.reuters.com/a');
+  assert.equal(inline.dataset.sourceTier,'news');assert.equal(inline.title,'News · reuters.com');
+  await page.runtime({type:'UI_LANGUAGE_CHANGED',language:'zh-CN'});
+  assert.equal(mix.textContent,'来源：新闻 1 · 社交媒体 1');assert.equal(chips[0].textContent,'社交媒体');assert.equal(inline.title,'新闻 · reuters.com');
+});
+
+test('history adds the missing-source line only beside footer rows',async () => {
+  const page = fixture({entries:[
+    post('1',{analysis:{text:'Only a forum thread.',sources:[{url:'https://www.reddit.com/r/a',title:'Thread'}]}}),
+    post('2',{lastViewedAt:current-2000,analysis:{text:'[Inline only](https://www.reddit.com/r/b)',sources:[{url:'https://www.reddit.com/r/b',title:'1'}]}})
+  ]});
+  await page.controller.start();
+  for (const details of nodes(page.$('history-list'),'details')) {details.open = true;await details.trigger('toggle');}
+  const [weak,inline] = page.articles();
+  const block = nodes(weak,'div').find(node => node.className === 'answer-sources');
+  assert.equal(nodes(block,'span').find(node => node.className === 'source-weak').textContent,'No official, academic or news source cited');
+  assert.equal(nodes(inline,'div').some(node => node.className === 'answer-sources'),false,'Inline-only sources add no extra block');
+  assert.equal(nodes(inline,'a').find(node => node.href === 'https://www.reddit.com/r/b').title,'Social · reddit.com');
+});

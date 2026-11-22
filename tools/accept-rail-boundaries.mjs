@@ -13,7 +13,7 @@ const output=path.join(root,'artifacts','rail-boundaries');
 const require=createRequire(import.meta.url);
 let playwright;
 try{playwright=require('playwright');}catch{playwright=await import(pathToFileURL(process.env.SUPERX_PLAYWRIGHT_MODULE||path.join(os.homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','node','node_modules','playwright','index.mjs')));}
-const scripts=['x-dom.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','content.js'];
+const scripts=['x-dom.js','source-quality.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','content.js'];
 const sources=Object.fromEntries(await Promise.all(scripts.map(async name=>[name,await readFile(path.join(root,'extension',name),'utf8')])));
 const report={environment:'Fresh isolated Chromium; all routes intercepted; cached fabricated results only',checks:[],errors:[],externalRequests:[],scenes:[],screenshots:[]};
 function check(name,value,details){report.checks.push({name,passed:Boolean(value),...(details===undefined?{}:{details})});}

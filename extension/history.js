@@ -111,6 +111,20 @@
       if (view.label) {const badge = element('span','verdict-badge'),dot = element('span','verdict-dot');dot.setAttribute('aria-hidden','true');badge.append(dot,element('span','verdict-label',view.label));row.append(badge);}
       if (view.gaps.length) {const list = element('span','verdict-gaps',view.prefix);for (const gap of view.gaps) {const item = element('span','',gap.label);item.title = gap.title;list.append(' · ',item);}row.append(list);}
     }
+    // Tiers are derived from addresses at render time and never stored, so
+    // this also relabels old entries and follows the interface language.
+    function renderSourceLabels({anchors,chips,mix,summary}) {
+      for (const {node,url,title} of anchors) {
+        const tier = core.Sources.tier(url);node.dataset.sourceTier = tier;
+        node.title = [title,t('source.' + tier) + ' · ' + core.Sources.displayHost(url)].filter(Boolean).join('\n');
+      }
+      for (const chip of chips) setText(chip.node,t('source.' + chip.tier));
+      if (!mix) return;
+      const view = core.Sources.mixView(summary,t,number);
+      mix.hidden = !view;if (!view) return;
+      mix.title = view.hint;mix.replaceChildren(view.text);
+      if (view.weak) mix.append(element('span','source-weak',view.weak));
+    }
     function renderAnswer(target,entry) {
       target.replaceChildren();
       const analysis = entry.analysis;
@@ -131,12 +145,23 @@
           const separator = element('hr','fact-check-divider');target.append(separator);
           const factCheck = element('div','answer-markdown');markdown.render(factCheck,analysis.text.slice(boundary));target.append(factCheck);
         } else { markdown.render(explanation,analysis.text);target.append(explanation); }
+        const anchors = Array.from(target.querySelectorAll('a')).flatMap(node => {const url = safeSourceUrl(node.href);return url ? [{node,url,title:node.title || ''}] : [];});
         const unused = analysis.sources.filter(source => !analysis.text.includes(source.url));
+        labels.sources = {anchors,chips:[]};
+        // The mix line only joins footer rows: when every source is already
+        // linked inline, the answer itself shows them and a line would be noise.
         if (unused.length) {
           const sources = element('div','answer-sources');
-          for (const source of unused) sources.append(link(source.url,source.title && !/^\d+$/.test(source.title.trim()) ? source.title : new URL(source.url).hostname));
+          labels.sources.summary = core.Sources.summarize([...anchors.map(anchor => anchor.url),...analysis.sources.map(source => source.url)],{exclude:[entry.url]});
+          labels.sources.mix = element('p','source-mix');sources.append(labels.sources.mix);
+          for (const source of unused) {
+            const row = element('div','source-row'),chip = element('span','tier'),tier = core.Sources.tier(source.url);
+            chip.className = 'tier tier-' + tier;labels.sources.chips.push({node:chip,tier});
+            row.append(chip,link(source.url,source.title && !/^\d+$/.test(source.title.trim()) ? source.title : new URL(source.url).hostname));sources.append(row);
+          }
           target.append(sources);
         }
+        renderSourceLabels(labels.sources);
       }
       if (entry.comments.length) {
         labels.commentsHeading = element('h3','comments-heading',t('history.comments'));target.append(labels.commentsHeading);
@@ -188,6 +213,7 @@
       if (row.summary) setText(row.summary,t(row.details.open ? 'history.hideAnswer' : 'history.showAnswer'));
       const labels = row.answerLabels,analysis = entry.analysis;
       if (labels?.verdict) renderVerdict(labels.verdict,analysis);
+      if (labels?.sources) renderSourceLabels(labels.sources);
       if (labels?.tokens) setText(labels.tokens,t('history.tokens',{count:number(totalTokens(analysis.usage)) + (analysis.usageComplete ? '' : '+')}));
       if (labels?.model) setText(labels.model,t('history.model',{model:analysis.model}));
       if (labels?.warning) setText(labels.warning,t('history.previousAnswer'));

@@ -32,6 +32,7 @@
   let xUILanguage = UI.normalizeLanguage(document.documentElement.getAttribute('lang') || navigator.language || 'en');
   let uiLanguage = UI.resolveLanguage('auto',xUILanguage);
   const t = (key, vars) => UI.t(key, uiLanguage, vars);
+  const Sources = Core.Sources, authoredTitles = new WeakMap(), numberFormatters = new Map();
   let settings = Core.DEFAULT_SETTINGS, providerReady = false, connected = false, port, used = 0, collapsed = false;
   let lastPath = pageRouteKey(), scanTimer, reconnectTimer, handshakeTimer, dwellTimer, dwellDeadline=0, needsPageRefresh = false;
   let hasConfig=false,workerSleeping=false,awaitingConfig=false,reconnectFailures=0,xModalBlocked=false,pageSuspended=false;
@@ -1346,7 +1347,7 @@
     entry.ui.retry.disabled=!usableConnection()||!settings.enabled||['queued','running','retry-wait'].includes(entry.status)||wakeActions.has(wakeKey(entry,'analysis'));
     if(!providerReady)entry.ui.retry.hidden=true;
     else if(['done','error'].includes(entry.status))entry.ui.retry.hidden=false;
-    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);syncPostControl(entry);
+    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);renderSources(entry);syncPostControl(entry);
   }
   function automaticTrigger(entry) {
     if(entry.triggerSuppressed)return null;
@@ -1950,6 +1951,7 @@
     if(label.title!==title)label.title=title;
     if(label.getAttribute('aria-label')!==aria)label.setAttribute('aria-label',aria);
   }
+  function formatNumber(value){try{if(!numberFormatters.has(uiLanguage))numberFormatters.set(uiLanguage,new Intl.NumberFormat(uiLanguage));return numberFormatters.get(uiLanguage).format(value);}catch{return String(value);}}
   function node(tag,className,text){const e=document.createElement(tag);if(className)e.className=className;if(text)e.textContent=text;return e;}
   function chevron(direction){
     const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');
@@ -1983,7 +1985,7 @@
       .answer code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em;white-space:pre-wrap;overflow-wrap:anywhere;background:rgba(127,127,127,.13);padding:1px 4px}.answer pre{max-width:100%;margin:12px 0;padding:10px;border:1px solid var(--gf-border,#2f3336);white-space:pre-wrap;overflow-wrap:anywhere}.answer pre code{display:block;font-size:.85em;background:transparent;padding:0;white-space:pre-wrap;overflow-wrap:anywhere}.answer hr{border:0;border-top:1px solid var(--gf-border,#2f3336);margin:16px 0}
       .answer .analysis-section>:first-child{margin-top:0}.answer .analysis-section>:last-child{margin-bottom:0}.answer .analysis-divider{margin:16px 0}.answer .analysis-divider[hidden],.answer .verification-answer[hidden]{display:none}
       .answer table{width:100%;max-width:100%;table-layout:fixed;border-collapse:collapse;font-size:.9em;margin:12px 0}.answer th,.answer td{border:1px solid var(--gf-border,#2f3336);padding:6px;text-align:start;vertical-align:top;overflow-wrap:anywhere;word-break:break-word}.answer th{font-weight:700}.answer .md-align-left{text-align:left}.answer .md-align-center{text-align:center}.answer .md-align-right{text-align:right}.answer .markdown-literal{white-space:pre-wrap}
-      a{color:var(--gf-accent,#1d9bf0);text-decoration:none;overflow-wrap:anywhere;word-break:break-word;}a:hover{text-decoration:underline}.sources{font-size:13px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin-top:12px}.sources:empty{display:none}.note{color:var(--gf-muted,#71767b);font-size:12px;margin-top:12px;overflow-wrap:anywhere;}.note:empty{display:none}
+      a{color:var(--gf-accent,#1d9bf0);text-decoration:none;overflow-wrap:anywhere;word-break:break-word;}a:hover{text-decoration:underline}.sources{font-size:13px;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin-top:12px}.sources:empty{display:none}.source-mix{color:var(--gf-muted,#71767b);font-size:12px;line-height:16px}.source-weak{display:block;margin-top:2px;color:var(--gf-fg,#e7e9ea)}.source-row{display:flex;align-items:baseline;gap:6px;min-width:0}.source-row a{min-width:0}.tier{flex:none;font-size:11px;line-height:16px;padding:0 5px;border:1px solid color-mix(in srgb,var(--gf-muted,#71767b) 45%,transparent);border-radius:4px;color:var(--gf-muted,#71767b);white-space:nowrap}.note{color:var(--gf-muted,#71767b);font-size:12px;margin-top:12px;overflow-wrap:anywhere;}.note:empty{display:none}
       .usage-help{display:flex;flex-wrap:wrap;gap:6px 12px;margin-top:10px;font-size:13px}.usage-help[hidden]{display:none}
       .actions{display:none;flex-wrap:wrap;gap:12px;margin-top:12px;font-size:13px}.actions:has(button:not([hidden])){display:flex}.actions button[hidden]{display:none}
       .retry-status{color:var(--gf-muted,#71767b);font-size:12px;overflow-wrap:anywhere;margin-top:10px}.retry-status[hidden]{display:none}
@@ -2087,16 +2089,37 @@
     try {path=decodeURIComponent(path);}catch{}
     return (url.hostname+path+url.search+url.hash).slice(0,200);
   }
+  // Tier labels come from the address only and are computed on every render,
+  // so they follow the interface language and never reach storage.
+  function labelSourceLink(link,url) {
+    if(!authoredTitles.has(link))authoredTitles.set(link,link.title||'');
+    const tier=Sources.tier(url.href),label=t('source.'+tier)+' · '+Sources.displayHost(url.href);
+    link.dataset.sourceTier=tier;link.title=[authoredTitles.get(link),label].filter(Boolean).join('\n');
+  }
   function renderSources(entry,sources) {
     if(sources!==undefined)entry.sourceList=Array.isArray(sources)?sources:[];
-    const target=entry.ui.sources;target.replaceChildren();
-    const seen=new Set(Array.from(entry.ui.answer.querySelectorAll('a')).map(link=>sourceUrl(link.href)?.href).filter(Boolean));
-    let count=0;
+    const inline=Array.from(entry.ui.answer.querySelectorAll('a')).map(link=>[link,sourceUrl(link.href)]).filter(([,url])=>url);
+    for(const [link,url] of inline)labelSourceLink(link,url);
+    const seen=new Set(inline.map(([,url])=>url.href)),rows=[];
     for(const source of entry.sourceList||[]) {
       const url=sourceUrl(source?.url);if(!url||seen.has(url.href))continue;
-      seen.add(url.href);
-      const link=node('a','',sourceLabel(source,url));link.href=url.href;link.title=url.href;link.target='_blank';link.rel='noopener noreferrer';target.append(link);
-      if(++count===12)break;
+      seen.add(url.href);rows.push({href:url.href,label:sourceLabel(source,url),tier:Sources.tier(url.href)});
+      if(rows.length===12)break;
+    }
+    // Like the verdict gaps, the mix waits for the run to end so a streaming
+    // answer does not flicker between counts.
+    const ended=['done','error','retry-wait'].includes(entry.status);
+    const mix=ended?Sources.mixView(Sources.summarize([...inline.map(([,url])=>url.href),...(entry.sourceList||[]).map(source=>source?.url)],{exclude:[entry.post?.url]}),t,formatNumber):null;
+    const target=entry.ui.sources,signature=JSON.stringify([uiLanguage,rows,mix]);
+    // Streaming and card refreshes call this often; keep link nodes (and any
+    // keyboard focus on them) unless something visible changed.
+    if(target.sourceSignature===signature)return;
+    target.sourceSignature=signature;target.replaceChildren();
+    if(mix){const line=node('div','source-mix',mix.text);line.title=mix.hint;if(mix.weak)line.append(node('span','source-weak',mix.weak));target.append(line);}
+    for(const row of rows) {
+      const item=node('div','source-row'),link=node('a','',row.label);
+      link.href=row.href;link.title=row.href;link.target='_blank';link.rel='noopener noreferrer';
+      item.append(node('span','tier tier-'+row.tier,t('source.'+row.tier)),link);target.append(item);
     }
   }
 })();

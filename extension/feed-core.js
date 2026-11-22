@@ -1,10 +1,12 @@
 (function (root, factory) {
   'use strict';
-  const dom = root?.SuperXXDOM || (typeof module === 'object' && module.exports ? require('./x-dom.js') : undefined);
-  const core = factory(dom);
-  if (typeof module === 'object' && module.exports) module.exports = core;
+  const node = typeof module === 'object' && module.exports;
+  const dom = root?.SuperXXDOM || (node ? require('./x-dom.js') : undefined);
+  const sources = root?.SuperXSourceQuality || (node ? require('./source-quality.js') : undefined);
+  const core = factory(dom, sources);
+  if (node) module.exports = core;
   if (root) root.XGrokCore = core;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM, Sources) {
   'use strict';
 
   const LANGUAGES = Object.freeze([
@@ -968,5 +970,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });
