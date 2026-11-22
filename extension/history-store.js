@@ -43,7 +43,11 @@
     return result;
   }
   function model(value){return typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)?value:'';}
-  function scope(value){return typeof value==='string'&&/^(?:api|build|oauth:[A-Za-z0-9-]{1,100})$/.test(value)?value:'';}
+  // Whose answer this is: a provider registry id, or the signed-in account
+  // for 'oauth'. A copy of the registry ids, kept identical by a test; an
+  // unknown scope is dropped and the answer then reads as the xAI Key's.
+  const SCOPES=Object.freeze(['api','build','claude']);
+  function scope(value){return typeof value==='string'&&(SCOPES.includes(value)||/^oauth:[A-Za-z0-9-]{1,100}$/.test(value))?value:'';}
   function metadata(value){
     const result={};if(value?.usage&&typeof value.usage==='object')result.usage=usage(value.usage);
     if(typeof value?.usageComplete==='boolean')result.usageComplete=value.usageComplete;
@@ -171,5 +175,5 @@
     };
     return store;
   }
-  return {create,LIMITS,STORAGE_KEY,ENABLED_KEY,VERDICTS,CHECK_GAPS,normalizedEntries};
+  return {create,LIMITS,STORAGE_KEY,ENABLED_KEY,VERDICTS,CHECK_GAPS,SCOPES,normalizedEntries};
 });

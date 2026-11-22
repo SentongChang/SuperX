@@ -4286,6 +4286,17 @@ test('Claude: a retried check reuses its screen instead of paying for another',a
   assert.deepEqual(result.result.claudeRoute,{model:'claude-haiku-5-5',reason:'simple'});
 });
 
+test('Claude: history keeps a Claude answer with Claude and hides it from the xAI Key',async()=>{
+  const {bg,port}=await readyBackground('claude');
+  await visitHistory(bg,port,[100]);
+  assert.equal((await analyzePost(bg,port,'claude-history',post(100))).type,'RESULT');
+  await until(()=>bg.local.data.superxHistory?.[0]?.analysis);
+  assert.equal(bg.local.data.superxHistory[0].analysis.scope,'claude');
+  assert.equal((await bg.message({type:'GET_HISTORY'})).entries[0].analysis.text,'Claude finding 100');
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,provider:'api'}})).ok,true);
+  assert.equal((await bg.message({type:'GET_HISTORY'})).entries[0].analysis,undefined);
+});
+
 // Golden characterization for the provider registry (WP7-P0). The stored
 // cache key strings and Settings focus below were recorded before the
 // registry existed and must stay byte-identical through it.

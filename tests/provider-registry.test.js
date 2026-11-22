@@ -1,7 +1,7 @@
 'use strict';
 // The provider registry must agree with every hand-written place that names
-// a connection: settings, options.html, the manifest and the translations.
-// Behaviour per provider is pinned by the golden tests.
+// a connection: settings, options.html, the manifest, the history store and
+// the translations. Behaviour per provider is pinned by the golden tests.
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
@@ -9,6 +9,7 @@ const {join}=require('node:path');
 const P=require('../extension/provider-registry.js');
 const Core=require('../extension/feed-core.js');
 const UI=require('../extension/ui-i18n.js');
+const History=require('../extension/history-store.js');
 
 const extension=file=>readFileSync(join(__dirname,'..','extension',file),'utf8');
 const options=extension('options.html');
@@ -82,3 +83,10 @@ test('registry: the manifest grants every host a connection contacts',()=>{
   for(const descriptor of P.list)for(const host of descriptor.hosts)assert.ok(granted.includes(host),descriptor.id+' '+host);
 });
 
+test('registry: the history store keeps each connection\'s answers apart',()=>{
+  // Sign-in answers belong to one account; every other connection is its id.
+  assert.deepEqual(History.SCOPES,P.ids.filter(id=>id!=='oauth'));
+  const now=Date.now(),entry=scope=>({id:'100',url:'https://x.com/author/status/100',firstViewedAt:now,lastViewedAt:now,analysis:{text:'Finding',scope,completedAt:now}});
+  for(const scope of [...History.SCOPES,'oauth:account-1'])assert.equal(History.normalizedEntries([entry(scope)],now)[0].analysis.scope,scope);
+  assert.equal(History.normalizedEntries([entry('native')],now)[0].analysis.scope,undefined);
+});
