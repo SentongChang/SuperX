@@ -761,7 +761,7 @@
       entry.phase=request.phase=message.phase;
       const phases={starting:'status.verifying',explain:'status.explaining',verification_queued:'status.verificationQueued',verify:'status.verifying',inline:'status.inline'};
       status(entry,phases[message.phase]||'status.verifying');
-      if(suppliedText&&!(entry.keepRetryAnswer&&!readerText.trim())){renderAnswer(entry,readerText);if(readerText.trim())entry.keepRetryAnswer=false;}
+      if(suppliedText&&!(entry.keepRetryAnswer&&!readerText.trim())){entry.verdict=message.verdict;renderAnswer(entry,readerText);if(readerText.trim())entry.keepRetryAnswer=false;}
       else if(verifying&&entry.latestText)renderAnswer(entry,entry.latestText);
       if(message.sources)renderSources(entry,message.sources);
       if(message.warning)note(entry,['explain','verification_queued'].includes(message.phase)?'note.checkIncomplete':'note.possibleErrors');
@@ -782,7 +782,7 @@
       const limit=Core.accountLimitReason?.(entry.verificationFailure);
       entry.status=retryWaiting?'retry-wait':'error';entry.phase='';entry.errorCode=message.code;status(entry,limit?'account.'+limit:isCapacityFailure(message.code,entry.verificationFailure)?'error.apiCapacity':partialVerification?'status.incomplete':errorKey(message.code,entry.verificationFailure));note(entry,'');entry.ui.retry.hidden=retryWaiting;
       if(['API_LANGUAGE_MISMATCH','BUILD_LANGUAGE_MISMATCH'].includes(message.code)){entry.cached=false;entry.result=null;renderAnswer(entry,'',true);renderSources(entry,[]);}
-      if(partialResult){entry.verificationStart=partialResult.verificationStart;renderAnswer(entry,partialResult.text,true);renderSources(entry,partialResult.sources||[]);note(entry,retained.invalid?'':partialResultNote(partialResult));}
+      if(partialResult){entry.verificationStart=partialResult.verificationStart;entry.verdict=partialResult.verdict;entry.gaps=partialResult.gaps;renderAnswer(entry,partialResult.text,true);renderSources(entry,partialResult.sources||[]);note(entry,retained.invalid?'':partialResultNote(partialResult));}
       entry.keepRetryAnswer=retryWaiting&&Boolean(entry.latestText?.trim());
       retryPhase(entry,'analysis',retryWaiting?'waiting':'exhausted',message);
       if(!entry.verificationFailure&&!entry.requestDiagnostics&&!entry.commentRequestDiagnostics) {
@@ -807,7 +807,7 @@
     captureUsage(entry,'analysis',result,request,Boolean(message.cached),true);
     entry.status=invalid?'error':'done';entry.result=result;entry.verificationStart=result.verificationStart;
     if(invalid)entry.errorCode='API_INCOMPLETE';
-    renderAnswer(entry,result.text,true);renderSources(entry,result.sources||[]);
+    entry.verdict=result.verdict;entry.gaps=result.gaps;renderAnswer(entry,result.text,true);renderSources(entry,result.sources||[]);
     const incomplete=['incomplete','failed'].includes(result.verificationStatus);
     if(incomplete)retryPhase(entry,'analysis','exhausted',message);
     entry.requestDiagnostics=Core.sanitizedRequestDiagnostics(result.requestDiagnostics||message.requestDiagnostics);
@@ -1346,7 +1346,7 @@
     entry.ui.retry.disabled=!usableConnection()||!settings.enabled||['queued','running','retry-wait'].includes(entry.status)||wakeActions.has(wakeKey(entry,'analysis'));
     if(!providerReady)entry.ui.retry.hidden=true;
     else if(['done','error'].includes(entry.status))entry.ui.retry.hidden=false;
-    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);syncPostControl(entry);
+    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);syncPostControl(entry);
   }
   function automaticTrigger(entry) {
     if(entry.triggerSuppressed)return null;
@@ -1423,7 +1423,7 @@
     for(const entry of request.followers||[]){
       if(!nativeEntryCurrent(entry)){entry.card.hidden=true;continue;}
       if(Core.apiPostIdentity(entry.post,settings)!==request.apiIdentity){request.followers.delete(entry);continue;}
-      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed'])entry[field]=source[field];
+      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed','verdict','gaps'])entry[field]=source[field];
       entry.pending=false;entry.since=0;entry.analysisUsage=source.analysisUsage?{...source.analysisUsage}:null;
       renderAnswer(entry,source.latestText||'',true);renderSources(entry,source.sourceList||[]);note(entry,source.noteKey||'');refreshCard(entry);
     }
@@ -1993,9 +1993,15 @@
       .comments{display:grid;gap:0;margin-top:12px;border-top:1px solid var(--gf-border,#2f3336)}.comments[hidden],.comment-status[hidden]{display:none}.comments .comment-copy{display:block;width:100%;padding:10px 0;text-align:start;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--gf-fg,#e7e9ea);font-size:14px;border-bottom:1px solid var(--gf-border,#2f3336)}.comments .comment-copy:hover{background:rgba(127,127,127,.1);text-decoration:none}.comment-heading{font-size:13px;font-weight:700;margin-top:16px}.comment-hint{font-size:12px;color:var(--gf-muted,#71767b);margin-top:4px}.comment-heading[hidden],.comment-hint[hidden]{display:none}.comment-status,.copy-status{font-size:12px;color:var(--gf-muted,#71767b);overflow-wrap:anywhere;margin-top:10px}.copy-status:empty{display:none}
       @media(prefers-reduced-motion:reduce){.dot{animation:none;opacity:.7}.shimmer{animation:none;background:none;color:var(--gf-muted,#71767b)}}
       .diagnostics{font-size:12px;color:var(--gf-muted,#71767b);margin-top:12px}.diagnostics[hidden]{display:none}.diagnostics summary{cursor:pointer}.diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+      .verdict{--v:var(--gf-muted,#71767b);display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;margin-bottom:10px}.verdict[hidden]{display:none}
+      .verdict[data-verdict=accurate]{--v:#00ba7c}.verdict[data-verdict=inaccurate]{--v:#f4212e}.verdict[data-verdict=mixed]{--v:#ffad1f}
+      .verdict-badge{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700}.verdict-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--v);border:1.5px solid var(--v)}
+      .verdict[data-tentative] .verdict-dot,.verdict[data-verdict=unproven] .verdict-dot,.verdict[data-verdict=none] .verdict-dot{background:transparent}
+      .verdict-gaps{color:var(--gf-muted,#71767b);font-size:12px;overflow-wrap:anywhere}.verdict-gaps span{cursor:help}
       .token-usage{display:block;color:var(--gf-muted,#71767b);font-size:12px;margin-bottom:10px;overflow-wrap:anywhere;cursor:help}.token-usage[hidden]{display:none}.token-usage:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px}
     `;
     const box=node('section','card');box.setAttribute('aria-label',t('aria.result'));
+    const verdict=node('div','verdict');verdict.hidden=true;verdict.setAttribute('role','group');
     const status=node('div','status'),answer=node('div','answer'),sources=node('div','sources'),note=node('div','note'),actions=node('div','actions');status.setAttribute('role','status');
     answer.setAttribute('dir','auto');
     const explanationAnswer=node('div','analysis-section explanation-answer'),verificationAnswer=node('div','analysis-section verification-answer'),analysisDivider=node('hr','analysis-divider');analysisDivider.hidden=true;
@@ -2011,11 +2017,11 @@
     const retryStatus=node('div','retry-status analysis-retry-status'),commentRetryStatus=node('div','retry-status comment-retry-status');
     for(const label of [retryStatus,commentRetryStatus]){label.hidden=true;label.setAttribute('role','status');label.setAttribute('aria-live','polite');}
     const tokenUsage=node('span','token-usage');tokenUsage.hidden=true;tokenUsage.tabIndex=0;
-    actions.append(retry,generateButton);box.append(tokenUsage,status,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus);shadow.append(css,box);
+    actions.append(retry,generateButton);box.append(tokenUsage,status,verdict,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus);shadow.append(css,box);
     // Card controls belong to the overlay, separate from X's navigation handlers.
     for(const type of ['click','pointerdown','keydown'])card.addEventListener(type,event=>event.stopPropagation());
     card.addEventListener('scroll',scheduleLayout,{passive:true});
-    return {card,ui:{box,status,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
+    return {card,ui:{box,status,verdict,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
   }
   function validVerificationBoundary(text,start) {
     return typeof text==='string'&&Number.isSafeInteger(start)&&start>2&&start<=text.length&&text.slice(start-2,start)==='\n\n'&&Boolean(text.slice(0,start-2).trim());
@@ -2045,11 +2051,26 @@
   }
   function renderAnswer(entry,text,immediate=false) {
     entry.latestText=typeof text==='string'?text:'';
-    if(!entry.latestText){entry.verificationStart=undefined;entry.verificationBase='';}
-    syncLoading(entry);
+    if(!entry.latestText){entry.verificationStart=undefined;entry.verificationBase='';entry.verdict=undefined;entry.gaps=undefined;}
+    syncLoading(entry);renderVerdict(entry);
     if(immediate){if(entry.answerFrame!==undefined)cancelAnimationFrame(entry.answerFrame);entry.answerFrame=undefined;renderAnswerContent(entry);renderSources(entry);return;}
     if(entry.answerFrame!==undefined)return;
     entry.answerFrame=requestAnimationFrame(()=>{entry.answerFrame=undefined;if(!entry.card.isConnected)return;renderAnswerContent(entry);renderSources(entry);scheduleLayout();});
+  }
+  // The verdict shows as soon as a stream states it; gaps only once the run
+  // has ended, because "No search" mid-stream would be premature.
+  function renderVerdict(entry) {
+    const row=entry.ui.verdict,ended=['done','error','retry-wait'].includes(entry.status);
+    const view=Core.verdictRow({verdict:entry.verdict,gaps:ended?entry.gaps:[]},t),signature=JSON.stringify(view);
+    // Streaming re-renders the answer per delta; rebuild the row only on change.
+    if(row.verdictSignature===signature)return;
+    row.verdictSignature=signature;row.replaceChildren();row.hidden=view.empty;
+    if(view.verdict)row.setAttribute('data-verdict',view.verdict);else row.removeAttribute('data-verdict');
+    if(view.tentative)row.setAttribute('data-tentative','');else row.removeAttribute('data-tentative');
+    if(view.empty){row.removeAttribute('aria-label');return;}
+    row.setAttribute('aria-label',view.aria);
+    if(view.label){const badge=node('span','verdict-badge'),dot=node('span','verdict-dot');dot.setAttribute('aria-hidden','true');badge.append(dot,node('span','verdict-label',view.label));row.append(badge);}
+    if(view.gaps.length){const list=node('span','verdict-gaps',view.prefix);for(const gap of view.gaps){const item=node('span','',gap.label);item.title=gap.title;list.append(' · ',item);}row.append(list);}
   }
   function renderText(target,text) {
     GrokFirstMarkdown.render(target,text);

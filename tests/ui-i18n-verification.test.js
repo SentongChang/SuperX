@@ -341,3 +341,16 @@ test('draft search tooltip describes call records without claiming retrieval suc
   assert.equal(ui.t('draft.searchEvidenceNote','zh-CN'),'有调用记录不代表已取得有效证据或结论一定正确。');
   for(const retired of ['draft.searchConfirmed','draft.searchNotObserved','draft.searchUnknown'])assert.equal(Object.hasOwn(ui.catalog.en,retired),false);
 });
+
+test('verdict and gap labels exist in every language with matching placeholders and no English "verify" wording',()=>{
+  const keys=[...core.VERDICTS.map(verdict=>'verdict.'+verdict),'verdict.aria','gaps.label','gaps.aria',...core.CHECK_GAPS.flatMap(gap=>['gaps.'+gap,'gaps.'+gap+'Title'])];
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]);
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.deepEqual(placeholders(value),placeholders(ui.catalog.en[key]),`${language}: ${key} placeholders`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  assert.deepEqual(placeholders(ui.catalog.en['verdict.aria']),['verdict']);assert.deepEqual(placeholders(ui.catalog.en['gaps.aria']),['gaps']);
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('verdict.unproven','en'),'Not enough evidence');assert.equal(ui.t('gaps.label','zh-CN'),'核查不完整');
+});

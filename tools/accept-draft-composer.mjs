@@ -1150,6 +1150,13 @@ try{
   await edgePage.evaluate(()=>{const attachment=document.createElement('div');attachment.dataset.testid='attachments';attachment.style.cssText='height:60px;width:120px';attachment.textContent='Local draft attachment preview';document.querySelector('.composer .editor-row').after(attachment);qa.manager.scan();});await settle(edgePage);
   check('text boundaries: draft attachment preview shows accurate text-only notice',await edgePage.locator('superx-draft-panel .text-only').isVisible()&&(await edgePage.locator('superx-draft-panel .text-only').innerText()).includes('attachments are not included'));
   check('text boundaries: adding draft attachment never automatically sends content',await edgePage.evaluate(()=>qa.sent.filter(item=>item.type==='ANALYZE_DRAFT').length===1));
+  await emit(edgePage,{type:'UPDATE',requestId:emojiRequest.requestId,phase:'verify',text:'The moon claim needs a source.',verdict:'unproven'});await settle(edgePage);
+  const streamedVerdict=await edgePage.locator('superx-draft-panel .verdict').evaluate(node=>({hidden:node.hidden,text:node.textContent}));
+  check('verdict row: a streamed draft verdict shows before its gaps',!streamedVerdict.hidden&&streamedVerdict.text==='Not enough evidence',streamedVerdict);
+  await emit(edgePage,{type:'RESULT',requestId:emojiRequest.requestId,result:{text:'The moon claim needs a source.',verdict:'unproven',gaps:['media','search'],model:'grok-4.3'}});await settle(edgePage);
+  const draftVerdict=await edgePage.locator('superx-draft-panel').evaluate(node=>{const root=node.shadowRoot,row=root.querySelector('.verdict'),answer=root.querySelector('.answer');
+    return {text:row.textContent,verdict:row.dataset.verdict,aria:row.getAttribute('aria-label'),aboveAnswer:row.nextElementSibling===answer,title:row.querySelector('.verdict-gaps span')?.title,dot:getComputedStyle(row.querySelector('.verdict-dot')).backgroundColor};});
+  check('verdict row: the draft result shows its verdict and unsent attachments above the answer',draftVerdict.text==='Not enough evidencePartial check · Images not read · No search'&&draftVerdict.verdict==='unproven'&&draftVerdict.aboveAnswer&&draftVerdict.title==='At least one image was not available to the model.'&&draftVerdict.dot==='rgba(0, 0, 0, 0)',draftVerdict);
   await edgePage.screenshot({path:path.join(output,'emoji-parent-and-draft-media.png'),fullPage:true});report.screenshots.push('emoji-parent-and-draft-media.png');
   await edgeContext.close();
   const integration=await browser.newContext({viewport:{width:1300,height:1000}});

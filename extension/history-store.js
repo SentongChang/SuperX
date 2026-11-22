@@ -8,6 +8,10 @@
   'use strict';
   const STORAGE_KEY='superxHistory', ENABLED_KEY='superxHistoryEnabled';
   const LIMITS=Object.freeze({ttlMs:24*60*60*1000,maxEntries:1000,maxBytes:6_000_000});
+  // Copies of XGrokCore.VERDICTS and CHECK_GAPS: the worker loads this store
+  // without depending on Core, and a test keeps the lists identical.
+  const VERDICTS=Object.freeze(['accurate','inaccurate','mixed','unproven','none']);
+  const CHECK_GAPS=Object.freeze(['text','media','video','search']);
   const copy=value=>JSON.parse(JSON.stringify(value));
   const text=(value,limit)=>typeof value==='string'?value.slice(0,limit):'';
   function safeUrl(value){
@@ -58,6 +62,9 @@
     const sources=(Array.isArray(value.sources)?value.sources:[]).slice(0,20).map(item=>({url:safeUrl(item?.url),title:text(item?.title,200)})).filter(item=>item.url);
     const result={text:body,sources,verificationStatus:text(value.verificationStatus,40),language:text(value.language,30),completedAt:Number.isFinite(value.completedAt)&&value.completedAt>=0&&value.completedAt<=now?value.completedAt:now,...metadata(value)};
     if(scope(value.scope))result.scope=scope(value.scope);
+    if(VERDICTS.includes(value.verdict))result.verdict=value.verdict;
+    const gaps=Array.isArray(value.gaps)?CHECK_GAPS.filter(gap=>value.gaps.includes(gap)):[];
+    if(gaps.length)result.gaps=gaps;
     if(Number.isSafeInteger(value.verificationStart)&&value.verificationStart>=2&&value.verificationStart<=body.length&&body.slice(value.verificationStart-2,value.verificationStart)==='\n\n')result.verificationStart=value.verificationStart;
     if(value.verificationFailure?.stage==='verify'&&['TIMEOUT','CONNECTION','LANGUAGE_MISMATCH','RATE_LIMIT','INCOMPLETE','UNKNOWN'].includes(value.verificationFailure.code))result.verificationFailure={stage:'verify',code:value.verificationFailure.code};
     return result;
@@ -164,5 +171,5 @@
     };
     return store;
   }
-  return {create,LIMITS,STORAGE_KEY,ENABLED_KEY,normalizedEntries};
+  return {create,LIMITS,STORAGE_KEY,ENABLED_KEY,VERDICTS,CHECK_GAPS,normalizedEntries};
 });

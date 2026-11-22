@@ -274,6 +274,73 @@
     }
     return found?hidden(inFence&&!final?'pending':'tool_only'):content();
   }
+  // Every fact check opens with one strict ASCII marker line for the target's
+  // central claim. Providers strip it before any surface displays the answer.
+  const VERDICTS=Object.freeze(['accurate','inaccurate','mixed','unproven','none']);
+  // Canonical display order of the parts a check could not cover.
+  const CHECK_GAPS=Object.freeze(['text','media','video','search']);
+  const VERDICT_ALIASES=Object.freeze({ACCURATE:'accurate',TRUE:'accurate',INACCURATE:'inaccurate',FALSE:'inaccurate',
+    MIXED:'mixed',MISLEADING:'mixed',PARTLY_TRUE:'mixed',UNPROVEN:'unproven',UNVERIFIABLE:'unproven',INSUFFICIENT:'unproven',
+    INSUFFICIENT_EVIDENCE:'unproven',NONE:'none',NO_CLAIM:'none',NOCLAIM:'none'});
+  const LIMIT_ALIASES=Object.freeze({TEXT:'text',MEDIA:'media',IMAGE:'media',IMAGES:'media',VIDEO:'video'});
+  const VERDICT_LINE=/^\s*[*_`#>\[\]\s]*VERDICT\s*[:：][^\n]*(?:\n|$)/i;
+  const MAX_PENDING_VERDICT=160;
+  function verdictOutput(value,{final=false}={}) {
+    const text=typeof value==='string'?value:'';
+    const start=text.length-text.trimStart().length,end=text.indexOf('\n',start);
+    const raw=end<0?text.slice(start):text.slice(start,end);
+    // Models decorate the line with Markdown or a fullwidth colon; normalize
+    // only for matching. Nothing after the first line is ever examined.
+    const head=raw.replace(/^[*_`#>[\]\s]+|[*_`#>[\]\s]+$/g,'').replace(/：/g,':');
+    if(end<0&&!final&&('VERDICT'.startsWith(head.toUpperCase())||/^VERDICT/i.test(head)&&raw.length<=MAX_PENDING_VERDICT))
+      return {text:'',verdict:null,limits:[],pending:true};
+    const match=head.match(/^VERDICT\s*:\s*([A-Z_]+)\s*(?:[;|,]\s*LIMITS?\s*:\s*([A-Z_ ,]*))?$/i);
+    if(!match)return {text,verdict:null,limits:[],pending:false};
+    const tokens=(match[2]||'').toUpperCase().split(/[\s,]+/).map(token=>LIMIT_ALIASES[token]);
+    return {text:end<0?'':text.slice(end+1).replace(/^(?:[ \t]*\n)+/,''),verdict:VERDICT_ALIASES[match[1].toUpperCase()]||null,
+      limits:CHECK_GAPS.filter(gap=>tokens.includes(gap)),pending:false};
+  }
+  function formatVerdictLine(verdict,limits=[]) {
+    if(!VERDICTS.includes(verdict))return '';
+    // Search is never a model limit: the extension observes it directly.
+    const listed=CHECK_GAPS.filter(gap=>gap!=='search'&&limits.includes(gap));
+    return 'VERDICT: '+verdict.toUpperCase()+(listed.length?'; LIMITS: '+listed.join(',').toUpperCase():'');
+  }
+  // Until the provider registry lands, this is the single place that knows
+  // which connections can read X posts directly.
+  function providerCanSearchX(settings) {return settings?.provider!=='claude'&&settings?.xSearch===true;}
+  // Gaps come mostly from facts the extension already knows. The model's own
+  // LIMITS can add to them but never remove one. A draft is read in full, so
+  // its only gaps are unsent attachments and a missing search.
+  function checkGaps({post,settings,searched,limits=[],verdict}) {
+    const draft=post?.kind==='draft',gaps=new Set(draft?[]:limits),canFetchX=providerCanSearchX(settings);
+    const images=Array.isArray(post?.images)?post.images:[];
+    if(!draft&&post?.textTruncated===true&&!canFetchX)gaps.add('text');
+    if(draft?post.hasUncheckedMedia===true:images.some(image=>image?.kind!=='video-thumbnail'&&!imageInputURL(image?.url))||
+        post?.hasMedia===true&&post.hasVideo!==true&&!images.length)gaps.add('media');
+    if(!draft&&post?.hasVideo===true&&!canFetchX)gaps.add('video');
+    // A post with no checkable claim had nothing to search for.
+    if(searched!==true&&verdict!=='none')gaps.add('search');
+    return CHECK_GAPS.filter(gap=>gaps.has(gap));
+  }
+  function verdictFields(output,context) {
+    const gaps=checkGaps({...context,limits:output.limits,verdict:output.verdict});
+    return {...(output.verdict?{verdict:output.verdict}:{}),...(gaps.length?{gaps}:{})};
+  }
+  // Every surface reads stored or received results through this view.
+  function verdictView(result) {
+    const verdict=VERDICTS.includes(result?.verdict)?result.verdict:null;
+    const gaps=Array.isArray(result?.gaps)?CHECK_GAPS.filter(gap=>result.gaps.includes(gap)):[];
+    return {verdict,gaps,tentative:gaps.includes('search')&&['accurate','inaccurate','mixed'].includes(verdict)};
+  }
+  // Labels for a surface's verdict row. Each surface builds its own DOM from
+  // this with textContent only and hides the row when it carries nothing.
+  function verdictRow(result,t) {
+    const {verdict,gaps,tentative}=verdictView(result),label=verdict?t('verdict.'+verdict):'';
+    const items=gaps.map(gap=>({gap,label:t('gaps.'+gap),title:t('gaps.'+gap+'Title')}));
+    const aria=[label&&t('verdict.aria',{verdict:label}),items.length&&t('gaps.aria',{gaps:items.map(item=>item.label).join(', ')})].filter(Boolean).join('. ');
+    return {verdict,tentative,label,prefix:t('gaps.label'),gaps:items,aria,empty:!label&&!items.length};
+  }
   function explanationMode(settings) {
     return ['preset', 'custom'].includes(settings?.explanationMode) ? settings.explanationMode : 'preset';
   }
@@ -701,6 +768,9 @@
     if (!article || typeof article.querySelectorAll !== 'function') return null;
     const post = scopePost(article, article);
     if (!post.id || !post.url) return null;
+    // Only the checked post's own truncation matters; postFingerprint ignores
+    // the flag because expanding the post changes its text anyway.
+    if (DOM?.mainTextTruncated(article)) post.textTruncated = true;
     if (DOM?.isModern(article)) return {...post, quotedContext:DOM.quoteRoots(article).map(scope => extractPostContext(scope, 1)).filter(Boolean), isPromoted:isPromoted(article)};
     const roots = new Set(), visibility = new WeakMap();
     for (const element of all(article, 'a[href], [data-testid="tweetText"], time')) {
@@ -757,22 +827,10 @@
     return profiles.size && (profiles.size !== 1 || !profiles.has(handles[0])) ? '' : handles[0];
   }
   function contextTextTruncated(scope) {
-    if (DOM?.isModern(scope)) return DOM.bodyNodes(scope).some(element => {
-      if (DOM.bodyExpanders(element).length) return true;
-      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
-      const inline = attribute(element, 'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
-      const clamp = Number(style?.webkitLineClamp || style?.getPropertyValue?.('-webkit-line-clamp') || style?.lineClamp || inline);
-      return clamp > 0 && Number(element.clientHeight) > 0 && Number(element.scrollHeight) > Number(element.clientHeight) + 1;
-    });
+    if (DOM?.isModern(scope)) return DOM.bodyNodes(scope).some(element => DOM.bodyExpanders(element).length > 0 || DOM.lineClamped(element));
     const visibility = new WeakMap(),owns = element => ownedBy(element, scope, scope, contextQuoteRootFor);
     if (all(scope, '[data-testid="tweet-text-show-more-link"]').some(element => owns(element) && displayed(element,scope,visibility))) return true;
-    return all(scope, '[data-testid="tweetText"]').some(element => {
-      if (!owns(element) || !displayed(element,scope,visibility)) return false;
-      const style = element.ownerDocument?.defaultView?.getComputedStyle?.(element);
-      const inline = attribute(element,'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
-      const clamp = Number(style?.webkitLineClamp || style?.getPropertyValue?.('-webkit-line-clamp') || style?.lineClamp || inline);
-      return clamp > 0 && Number.isFinite(clamp) && Number(element.clientHeight) > 0 && Number(element.scrollHeight) > Number(element.clientHeight) + 1;
-    });
+    return all(scope, '[data-testid="tweetText"]').some(element => owns(element) && displayed(element,scope,visibility) && DOM.lineClamped(element));
   }
   function extractPostContext(scope, depth = 0) {
     if (!scope || typeof scope.querySelectorAll !== 'function') return null;
@@ -910,5 +968,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });

@@ -490,7 +490,12 @@ function sanitizeAnalysis(raw) {
   return {text:Core.readerOutput(value.text,{final:true}).text.slice(0,30000),
     verificationStatus:typeof value.verificationStatus==='string'?value.verificationStatus.slice(0,40):'',
     warning:typeof value.warning==='string'?value.warning.slice(0,1000):'',
-    sources:(Array.isArray(value.sources)?value.sources:[]).slice(0,20).map(source=>({url:GrokFirstAPI.safeUrl(source?.url),title:typeof source?.title==='string'?source.title.slice(0,200):''})).filter(source=>source.url)};
+    sources:(Array.isArray(value.sources)?value.sources:[]).slice(0,20).map(source=>({url:GrokFirstAPI.safeUrl(source?.url),title:typeof source?.title==='string'?source.title.slice(0,200):''})).filter(source=>source.url),
+    ...verdictMetadata(value)};
+}
+function verdictMetadata(value) {
+  const {verdict,gaps}=Core.verdictView(value);
+  return {...(verdict?{verdict}:{}),...(gaps.length?{gaps}:{})};
 }
 function commentCacheKey(post,s,inputFingerprint,analysis) {
   const prompts=['comments-prompt-v1',s.commentsPrompt];
@@ -911,7 +916,8 @@ async function executeJob(job) {
         if(text.trim())job.retainedFactCheck={...sanitizeAnalysis({...update,text}),...job.billing,provider:job.settings.provider,apiVerification:'only',verified:false,searched:update.searched===true};
         else if(job.attemptHasReaderText||!job.retryAttempts)delete job.retainedFactCheck;
       }
-      if(liveJob(job)&&!commentsJob(job))send(client.port,{type:'UPDATE',requestId,...(hasText&&(text.trim()||job.attemptHasReaderText||!job.retainedFactCheck)?{text}:{}),phase:update.phase,
+      // A text snapshot always states its verdict, so a reset clears the badge.
+      if(liveJob(job)&&!commentsJob(job))send(client.port,{type:'UPDATE',requestId,...(hasText&&(text.trim()||job.attemptHasReaderText||!job.retainedFactCheck)?{text,verdict:Core.verdictView(update).verdict}:{}),phase:update.phase,
         verificationStatus:update.verificationStatus,warning:update.warning,...(!hasText||text.trim()||job.attemptHasReaderText||!job.retainedFactCheck?{sources:update.sources}:{}),...aggregateBilling(job,job.billing),...verificationMetadata(update,job.settings.apiVerification,text||'')});
     };
     const result=withBillingMetadata(await (job.settings.provider==='build'?runAPI(job,onUpdate):waitForAbort(trackedAPICall(job,onUpdate),signal)),job.settings.provider,commentsJob(job)?undefined:job.settings.apiVerification);
@@ -927,7 +933,7 @@ async function executeJob(job) {
         // The current attempt's empty/tool-only final retracts its own stream.
         // It must not destroy a genuine partial retained from an earlier try.
         job.retainedFactCheck=job.previousPartial;
-        send(client.port,{type:'UPDATE',requestId,text:job.previousPartial?.text||'',sources:job.previousPartial?.sources||[],phase:'verify',verificationStatus:'pending',...aggregateBilling(job,job.billing)});
+        send(client.port,{type:'UPDATE',requestId,text:job.previousPartial?.text||'',verdict:job.previousPartial?.verdict||null,sources:job.previousPartial?.sources||[],phase:'verify',verificationStatus:'pending',...aggregateBilling(job,job.billing)});
         throw Object.assign(new Error('Grok 未返回可显示的核查答案，可手动重试。'),{code:'API_INCOMPLETE',verificationFailure:{stage:'verify',code:'INCOMPLETE',errorCode:'API_INCOMPLETE'},...job.billing});
       }
       result.text=reader.text.slice(0,30000);

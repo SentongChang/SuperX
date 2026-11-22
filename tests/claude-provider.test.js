@@ -200,3 +200,16 @@ test('Claude keys are recognised by prefix', () => {
   assert.equal(claude.validKey('sk-ant-short'),false);
   assert.equal(claude.ticksToUSD(25_000_000_0),0.025);
 });
+
+test('Claude answers carry a verdict, and gaps for what Claude could not read from X', async () => {
+  const updates = [];
+  const result = await api.run({...post,textTruncated:true,hasVideo:true},settings,KEY,{onUpdate:update=>updates.push(update),fetchImpl:async()=>response(
+    turn({preface:'VERDICT: MIXED\nChecking the height first.',answer:'VERDICT: ACCURATE\n\nThe tower is about 330 metres tall.'}))});
+  assert.equal(updates.some(update=>/VERDICT/.test(update.text)),false);
+  const shown = [...new Set(updates.filter(update=>update.text).map(update=>update.verdict+': '+update.text))];
+  assert.deepEqual(shown,['mixed: Checking the height first.','accurate: The tower is about 330 metres tall.']);
+  // The search resets the visible text; its update states that no verdict is known yet.
+  const reset = updates.findIndex(update=>update.verdict==='mixed')+1;
+  assert.equal(updates[reset].text,'');assert.equal(updates[reset].verdict,null);
+  assert.equal(result.text,'The tower is about 330 metres tall.');assert.equal(result.verdict,'accurate');assert.deepEqual(result.gaps,['text','video']);
+});

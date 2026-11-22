@@ -216,7 +216,7 @@ test('composer context usernames use only an unambiguous owned header and matchi
 test('composer context marks real Show more and line-clamp truncation independently of missing permalinks',()=>{
   const linked=e('article',{},[header('parent','123'),tweetText('Visible excerpt.'),e('button',{'data-testid':'tweet-text-show-more-link'},[],'Show more')]);
   assert.equal(core.extractPostContext(linked).textTruncated,true);assert.equal(core.extractPostContext(linked).snapshotOnly,undefined);
-  assert.equal(core.extractPost(linked).textTruncated,undefined,'The existing feed result shape is unchanged');
+  assert.equal(core.extractPost(linked).textTruncated,true,'The checked post reports its own Show more for the text gap');
   const text=tweetText('Clamped excerpt.');text.attrs.style='display:-webkit-box;-webkit-line-clamp:2';text.clientHeight=40;text.scrollHeight=80;
   const preview=e('button',{},[e('div',{'data-testid':'User-Name'},[],'@name'),text]);
   assert.equal(core.extractPostContext(preview).textTruncated,true);assert.equal(core.extractPostContext(preview).snapshotOnly,true);
@@ -2732,4 +2732,15 @@ test('account-limit reasons require explicit provider evidence and retain ambigu
   for(const [providerCode,expected] of cases)assert.equal(core.accountLimitReason({providerCode}),expected);
   assert.equal(core.accountLimitReason({httpStatus:429}),'limited');
   for(const value of [undefined,null,{}, {httpStatus:403},{httpStatus:402},{providerCode:'private-team:spending_limit'},{providerCode:'quota is exhausted'},{reason:'credits'}])assert.equal(core.accountLimitReason(value),'');
+});
+
+test('only the checked post\'s own Show more marks it truncated, and the flag never changes its fingerprint',()=>{
+  const showMore=()=>e('button',{'data-testid':'tweet-text-show-more-link'},[],'Show more');
+  const quoteLink=e('div',{role:'link'},[header('quoted','804'),tweetText('Quoted excerpt.'),showMore()]);
+  const quoted=core.extractPost(e('article',{'data-testid':'tweet'},[header('main','803'),tweetText('Main claim.'),quoteLink]));
+  assert.equal(quoted.textTruncated,undefined);assert.equal(quoted.quotedContext[0].textTruncated,true);
+  const main=core.extractPost(e('article',{'data-testid':'tweet'},[header('main','803'),tweetText('Main claim.'),showMore()]));
+  assert.equal(main.textTruncated,true);
+  const {textTruncated,...expanded}=main;
+  assert.equal(core.postFingerprint(main),core.postFingerprint(expanded));
 });

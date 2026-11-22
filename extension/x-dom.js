@@ -101,6 +101,28 @@
       hasClass(last, 'max-w-full') && hasClass(last, 'text-brand') && hasClass(last, 'hover:underline') ? [last] : [];
   }
 
+  function lineClamped(node) {
+    const style = styleFor(node);
+    const inline = attr(node, 'style').match(/(?:^|;)\s*(?:-webkit-)?line-clamp\s*:\s*(\d+)/i)?.[1];
+    const clamp = Number(style.webkitLineClamp || style.getPropertyValue?.('-webkit-line-clamp') || style.lineClamp || inline);
+    return clamp > 0 && Number(node.clientHeight) > 0 && Number(node.scrollHeight) > Number(node.clientHeight) + 1;
+  }
+
+  // The checked post's own body is cut short: X's inline expander, the legacy
+  // Show more link, or a line clamp that hides overflow. Quoted posts never
+  // count; the legacy timeline wraps them in a role=link card, not an article.
+  function mainTextTruncated(article) {
+    const legacy = attr(article, 'data-testid') === 'tweet';
+    const quoted = node => {
+      for (let current = node.parentElement; legacy && current && current !== article; current = current.parentElement) {
+        if (tag(current) !== 'a' && attr(current, 'role') === 'link') return true;
+      }
+      return false;
+    };
+    return all(article, '[data-testid="tweet-text-show-more-link"]').some(node => owns(node, article) && !quoted(node)) ||
+      bodyNodes(article).some(body => !quoted(body) && (bodyExpanders(body).length > 0 || lineClamped(body)));
+  }
+
   function authorNode(scope) {
     const legacy = all(scope, '[data-testid="User-Name"]').find(node => owns(node, scope));
     if (legacy) return legacy;
@@ -320,5 +342,5 @@
   }
 
   return Object.freeze({editorSelector, isEditor, form, primary, sidebar, articles, isModern, shell, row,
-    postURL, bodyNodes, bodyExpanders, authorNode, quoteRoots, owns, pageHeader, controls});
+    postURL, bodyNodes, bodyExpanders, lineClamped, mainTextTruncated, authorNode, quoteRoots, owns, pageHeader, controls});
 });

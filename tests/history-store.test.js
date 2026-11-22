@@ -105,3 +105,16 @@ test('statuses avoid duplicating the full history payload and returned DTOs cann
   const f=fixture();await f.store.visit([post(100)],0);const status=await f.store.status();assert.equal(status.entries,undefined);assert.equal(status.count,1);
   const response=await f.store.get();response.entries[0].text='Changed externally';response.entries.push(post(101));assert.equal((await f.store.get()).entries[0].text,'Visible post 100');assert.equal((await f.store.get()).count,1);
 });
+
+test('saved answers keep a valid verdict and known gaps in canonical order',()=>{
+  const now=1800000000000,record=analysis=>History.normalizedEntries([{...post(100),lastViewedAt:now,analysis:{text:'Checked.',...analysis}}],now)[0].analysis;
+  const valid=record({verdict:'mixed',gaps:['search','media','media']});
+  assert.equal(valid.verdict,'mixed');assert.deepEqual(valid.gaps,['media','search']);
+  const invalid=record({verdict:'probably',gaps:['smell']});
+  assert.equal(Object.hasOwn(invalid,'verdict'),false);assert.equal(Object.hasOwn(invalid,'gaps'),false);
+});
+
+test('the store keeps exact copies of the shared verdict and gap vocabularies',()=>{
+  const core=require('../extension/feed-core.js');
+  assert.deepEqual(History.VERDICTS,core.VERDICTS);assert.deepEqual(History.CHECK_GAPS,core.CHECK_GAPS);
+});

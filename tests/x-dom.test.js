@@ -336,3 +336,14 @@ test('a transparent retained page is excluded without treating an offscreen post
   visible.row.rect.top = -900; visible.row.rect.bottom = -600; documentWith(visible.row, faded.row);
   assert.deepEqual(DOM.articles(visible.row.parentElement), [visible.article]);
 });
+
+test('the checked modern post reports its own expander or clamp, never a clipped quote', () => {
+  const item = post('1'), nested = post('2', 'quote', 'Visible excerpt.');
+  nested.body.computed = {webkitLineClamp:'2'}; nested.body.clientHeight = 40; nested.body.scrollHeight = 80;
+  item.article.append(quote(nested)); documentWith(item.row);
+  assert.equal(DOM.mainTextTruncated(item.article), false);
+  const result = Core.extractPost(item.article);
+  assert.equal(result.textTruncated, undefined); assert.equal(result.quotedContext[0].textTruncated, true);
+  item.body.append(e('button', {type:'button', class:'max-w-full text-brand hover:underline'}, [], 'Show more'));
+  assert.equal(DOM.mainTextTruncated(item.article), true); assert.equal(Core.extractPost(item.article).textTruncated, true);
+});

@@ -4688,3 +4688,48 @@ test('golden: rail titles, usage links and Settings focus per provider',async()=
     assert.deepEqual(help.querySelectorAll('a').map(link=>[link.textContent,link.href]),links.map(([key,url])=>[ui.t(key,'zh-CN'),url]),provider);
   }
 });
+
+function verdictFixture() {
+  const page=fixture({postCount:1});page.configure({interfaceLanguage:'en'});
+  return {page,request:page.port.sent.find(message=>message.type==='ANALYZE'),card:page.cards()[0]};
+}
+
+test('the verdict row shows a streamed verdict at once, gaps only at the end, and clears on retry',()=>{
+  const {page,request,card}=verdictFixture();
+  const row=card.testShadow.querySelector('.verdict'),send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  assert.equal(row.hidden,true);
+  send({type:'START'});send({type:'UPDATE',phase:'verify',text:'',verdict:null});assert.equal(row.hidden,true);
+  send({type:'UPDATE',phase:'verify',text:'The date is right; the place is not.',verdict:'mixed'});
+  assert.equal(row.hidden,false);assert.equal(row.getAttribute('data-verdict'),'mixed');assert.equal(row.textContent,'Mixed');
+  assert.equal(row.getAttribute('aria-label'),'Fact check result: Mixed');
+  const children=card.testShadow.querySelector('.card').children;
+  assert.equal(children.indexOf(row),children.indexOf(card.testShadow.querySelector('.status'))+1,'The row sits between the status line and the answer');
+  send({type:'UPDATE',phase:'verify',text:'',verdict:null});assert.equal(row.hidden,true,'A text reset clears the badge');
+  send({type:'UPDATE',phase:'verify',text:'The date is right; the place is not.',verdict:'mixed'});
+  send({type:'RESULT',result:{provider:'api',text:'The date is right; the place is not.',verdict:'mixed',gaps:['media','search'],searched:false,verificationStatus:'unverified',sources:[]}});
+  assert.equal(row.textContent,'MixedPartial check · Images not read · No search');assert.equal(row.hasAttribute('data-tentative'),true);
+  assert.equal(row.getAttribute('aria-label'),'Fact check result: Mixed. Partial check: Images not read, No search');
+  assert.equal(row.querySelectorAll('span').find(node=>node.textContent==='Images not read').title,'At least one image was not available to the model.');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(row.textContent,'部分准确核查不完整 · 未读取图片 · 未搜索','Labels follow the interface language');
+  card.testShadow.querySelector('.retry').emit('click');page.flush();
+  assert.equal(row.hidden,true);assert.equal(row.textContent,'');
+});
+
+test('the verdict row needs no verdict to show gaps, and hides for answers without either',()=>{
+  const {page,request,card}=verdictFixture();const row=card.testShadow.querySelector('.verdict');
+  page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'Older cached answer.',sources:[]}});page.flush();
+  assert.equal(row.hidden,true);
+  const second=verdictFixture();
+  second.page.port.onMessage.emit({type:'RESULT',requestId:second.request.requestId,result:{provider:'api',text:'No marker.',gaps:['text','unknown'],verdict:'probably',sources:[]}});second.page.flush();
+  const gapsOnly=second.card.testShadow.querySelector('.verdict');
+  assert.equal(gapsOnly.hidden,false);assert.equal(gapsOnly.textContent,'Partial check · Full text not read');assert.equal(gapsOnly.hasAttribute('data-verdict'),false);
+});
+
+test('a partial answer keeps its verdict and gaps while the retry waits',()=>{
+  const {page,request,card}=verdictFixture();const row=card.testShadow.querySelector('.verdict');
+  page.port.onMessage.emit({type:'START',requestId:request.requestId});
+  retryWait(page,request,{code:'API_INCOMPLETE',partialResult:{provider:'api',apiVerification:'only',text:'The value is lower.',verdict:'inaccurate',gaps:['search'],verificationStatus:'incomplete',verificationFailure:{stage:'verify',code:'INCOMPLETE'}}});
+  assert.equal(row.textContent,'InaccuratePartial check · No search');
+  assert.match(card.testShadow.querySelector('.status').textContent,/Fact check incomplete/);
+});

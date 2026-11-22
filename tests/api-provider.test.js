@@ -1781,3 +1781,53 @@ test('OAuth cancellation during initial token lookup or 401 recovery never sends
     await assert.rejects(result,error=>error.code==='CANCELED');assert.equal(calls,phase==='initial'?0:1);
   }
 });
+
+test('the verdict rule sits in the fixed rules of post and draft checks, never in comments',()=>{
+  const custom={...core.DEFAULT_SETTINGS,explanationMode:'custom',verifyPrompt:'EDITABLE_TASK'};
+  const fixedPart=instructions=>instructions.slice(instructions.indexOf('Fixed application rules'));
+  const published=api.buildRequest(post,custom).instructions;
+  assert.ok(published.indexOf('EDITABLE_TASK')<published.indexOf('Fixed application rules'));
+  assert.match(fixedPart(published),/Begin the answer with exactly one line in this form.*`VERDICT: CODE`.*; LIMITS:/s);
+  const draft={kind:'draft',id:'d',mode:'post',text:'The moon is made of cheese.'};
+  assert.match(fixedPart(api.buildRequest(draft,custom).instructions),/Begin the answer with exactly one line in this form/);
+  // Maximum editable prompts switch the draft to its compact fixed rules.
+  const compact=api.buildRequest({...draft,text:'D'.repeat(30000)},{...custom,verifyPrompt:'V'.repeat(12000),postDraftPrompt:'P'.repeat(12000)}).instructions;
+  assert.doesNotMatch(compact,/Begin the answer with exactly one line/);
+  assert.match(fixedPart(compact),/First line: `VERDICT: ACCURATE\|INACCURATE\|MIXED\|UNPROVEN\|NONE`/);
+  assert.doesNotMatch(api.buildCommentsRequest(post,custom).instructions,/VERDICT/);
+});
+
+test('the marker never reaches displayed text while the verdict and gaps travel with the answer',async()=>{
+  const updates=[],deltas=['VERD','ICT: MIXED; LIMITS: ','MEDIA\n\n','The date is right; ','the place is not.'];
+  const result=await api.run({...post,hasMedia:true,images:[]},{...settings,language:'en'},'key',{onUpdate:update=>updates.push(update),fetchImpl:async()=>responseFor([
+    ...deltas.map(delta=>({type:'response.output_text.delta',delta})),
+    completed('VERDICT: MIXED; LIMITS: MEDIA\n\nThe date is right; the place is not.',{usage:{total_tokens:9,server_side_tool_usage_details:{web_search_calls:1}}})])});
+  assert.equal(updates.some(update=>/VERDICT|LIMITS/.test(update.text)),false);
+  // The badge can show as soon as the marker line is complete, before prose.
+  const first=updates.findIndex(update=>update.verdict);
+  assert.equal(updates[first].text,'');assert.equal(updates.slice(first).every(update=>update.verdict==='mixed'),true);
+  assert.equal(updates.find(update=>update.text).text,'The date is right; ');
+  assert.equal(result.text,'The date is right; the place is not.');assert.equal(result.verdict,'mixed');assert.deepEqual(result.gaps,['media']);
+});
+
+test('an answer without a marker gets no verdict, and an unsearched answer reports the search gap',async()=>{
+  const result=await api.run(post,{...settings,language:'en'},'key',{fetchImpl:async()=>responseFor([completed('Plain findings without a marker.')])});
+  assert.equal(result.text,'Plain findings without a marker.');assert.equal(Object.hasOwn(result,'verdict'),false);assert.deepEqual(result.gaps,['search']);
+});
+
+test('a marker-only answer is incomplete and a partial answer keeps its stripped verdict',async()=>{
+  await assert.rejects(api.run(post,{...settings,language:'en'},'key',{fetchImpl:async()=>responseFor([completed('VERDICT: ACCURATE',{usage:{total_tokens:4}})])}),error=>{
+    assert.equal(error.code,'API_INCOMPLETE');assert.equal(error.partialResult,undefined);assert.equal(error.usage.total_tokens,4);assert.equal(error.verificationFailure.code,'INCOMPLETE');return true;
+  });
+  const result=await api.run(post,{...settings,language:'en'},'key',{fetchImpl:async()=>responseFor([{type:'response.output_text.delta',delta:'VERDICT: INACCURATE\nThe audited value is lower.'}])});
+  assert.equal(result.verificationStatus,'incomplete');assert.equal(result.text,'The audited value is lower.');assert.equal(result.verdict,'inaccurate');assert.deepEqual(result.gaps,['search']);
+  await assert.rejects(api.run(post,{...settings,language:'en'},'key',{fetchImpl:async()=>responseFor([{type:'response.output_text.delta',delta:'VERDICT: INACCURATE\n'}])}),error=>error.partialResult===undefined);
+});
+
+test('the English marker line never counts against the answer language',()=>{
+  const marker='VERDICT: INSUFFICIENT_EVIDENCE; LIMITS: TEXT, MEDIA, VIDEO\n\n';
+  for(const [language,text] of [['zh-CN','现有证据不足以确定这一说法。'],['ru','Имеющихся данных недостаточно, чтобы подтвердить это утверждение.'],['ar','لا تكفي الأدلة المتاحة لحسم هذا الادعاء.']]){
+    assert.doesNotThrow(()=>api.assertMatchingScript(marker+text,language));
+    assert.doesNotThrow(()=>api.assertMatchingScript(marker+text,language,true));
+  }
+});

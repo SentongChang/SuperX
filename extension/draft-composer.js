@@ -721,6 +721,11 @@
         :host([data-native-boundary]) .panel::before{content:"";position:absolute;left:var(--sd-inset-left,0px);right:var(--sd-inset-right,0px);top:var(--sd-edge-top,-1px);height:var(--sd-edge-size,1px);background:var(--sd-edge-color);pointer-events:none}
         .header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 12px;margin-bottom:10px}.heading{display:flex;align-items:center;flex-wrap:wrap;gap:6px;min-width:0;flex:1}.title{font-size:14px;font-weight:700;white-space:nowrap}.separator{font-size:12px;color:color-mix(in srgb,var(--sd-fg) 55%,var(--sd-bg))}.state{display:inline-flex;align-items:center;gap:7px;font-size:12px;font-weight:400;color:color-mix(in srgb,var(--sd-fg) 72%,var(--sd-bg));overflow-wrap:anywhere}.state[tabindex]{cursor:help}.retry{font-size:13px;flex-shrink:0;white-space:nowrap}.spinner{width:11px;height:11px;border:1.5px solid currentColor;border-inline-end-color:transparent;border-radius:50%;animation:sd-spin .8s linear infinite;flex:none}.spinner[hidden]{display:none}@keyframes sd-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.spinner{animation:none;border-style:dotted}}
         .stale,.context{font-size:12px;color:color-mix(in srgb,var(--sd-fg) 72%,var(--sd-bg));overflow-wrap:anywhere}.stale{margin:8px 0;padding-inline-start:9px;border-inline-start:2px solid currentColor;color:var(--sd-fg)}.context{margin:4px 0 8px}
+        .verdict{--v:color-mix(in srgb,var(--sd-fg) 72%,var(--sd-bg));display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
+        .verdict[data-verdict=accurate]{--v:#00ba7c}.verdict[data-verdict=inaccurate]{--v:#f4212e}.verdict[data-verdict=mixed]{--v:#ffad1f}
+        .verdict-badge{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700}.verdict-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--v);border:1.5px solid var(--v)}
+        .verdict[data-tentative] .verdict-dot,.verdict[data-verdict=unproven] .verdict-dot,.verdict[data-verdict=none] .verdict-dot{background:transparent}
+        .verdict-gaps{font-size:12px;color:color-mix(in srgb,var(--sd-fg) 72%,var(--sd-bg));overflow-wrap:anywhere}.verdict-gaps span{cursor:help}
         .answer{overflow-wrap:anywhere;word-break:normal;margin-top:10px;max-width:100%;}.answer.folded{max-height:360px;overflow:hidden;mask-image:linear-gradient(to bottom,#000 calc(100% - 28px),transparent)}
         .answer p{margin:0 0 12px}.answer>:first-child{margin-top:0}.answer>:last-child{margin-bottom:0}.answer h1,.answer h2,.answer h3,.answer h4,.answer h5,.answer h6{font-size:1em;font-weight:700;line-height:1.5;margin:16px 0 8px}.answer ul,.answer ol{padding-inline-start:24px;margin:8px 0 12px}.answer li{margin:4px 0}.answer blockquote{margin:12px 0;padding-inline-start:12px;border-inline-start:2px solid color-mix(in srgb,var(--sd-fg) 25%,transparent)}
         .answer code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:.9em;white-space:pre-wrap;overflow-wrap:anywhere;background:color-mix(in srgb,var(--sd-fg) 9%,transparent);padding:1px 4px}.answer pre{max-width:100%;padding:10px;white-space:pre-wrap;overflow-wrap:anywhere;background:color-mix(in srgb,var(--sd-fg) 6%,transparent)}.answer pre code{background:transparent;padding:0}.answer table{width:100%;table-layout:fixed;border-collapse:collapse;margin:12px 0;font-size:.9em}.answer th,.answer td{padding:6px;border:1px solid color-mix(in srgb,var(--sd-fg) 22%,transparent);text-align:start;overflow-wrap:anywhere}.answer .md-align-left{text-align:left}.answer .md-align-center{text-align:center}.answer .md-align-right{text-align:right}.answer .markdown-literal{white-space:pre-wrap}.answer hr{border:0;border-top:1px solid color-mix(in srgb,var(--sd-fg) 22%,transparent);margin:14px 0}
@@ -731,15 +736,16 @@
       separator.setAttribute('aria-hidden','true');
       const status=element('span','state'),spinner=element('span','spinner'),statusLabel=element('span','state-label');spinner.setAttribute('aria-hidden','true');status.append(spinner,statusLabel);
       heading.append(title,separator,status);
-      const stale=element('div','stale'),textOnly=element('div','context text-only'),answer=element('div','answer'),sources=element('div','sources');
+      const stale=element('div','stale'),textOnly=element('div','context text-only'),verdict=element('div','verdict'),answer=element('div','answer'),sources=element('div','sources');
+      verdict.hidden=true;verdict.setAttribute('role','group');
       for(const message of [statusLabel,stale]){message.setAttribute('role','status');message.setAttribute('aria-live','polite');}
       answer.setAttribute('dir','auto');
       const more=button('more',()=>{state.expanded=!state.expanded;render(state);});
       const usageHelp=element('div','usage-help');usageHelp.hidden=true;
       const actions=element('div','actions'),retry=button('retry',()=>{if(state.binding)start(state.binding,true);}),settings=button('settings',()=>options.openSettings?.());
       header.append(heading,retry);actions.append(settings);
-      box.append(header,stale,textOnly,answer,more,sources,usageHelp,actions);shadow.append(style,box);
-      state.panel=panel;state.ui={box,title,status,statusLabel,spinner,stale,textOnly,answer,sources,usageHelp,more,retry,settings};
+      box.append(header,stale,textOnly,verdict,answer,more,sources,usageHelp,actions);shadow.append(style,box);
+      state.panel=panel;state.ui={box,title,status,statusLabel,spinner,stale,textOnly,verdict,answer,sources,usageHelp,more,retry,settings};
       byEditor.set(editor,state);states.add(state);return state;
     }
     function renderSources(state){
@@ -750,6 +756,19 @@
         seen.add(url.href);const link=element('a','',String(source.title||url.hostname+url.pathname).slice(0,200));
         link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';link.title=url.href;target.append(link);
       }
+    }
+    // Gaps appear only once the run has ended, like the rail card.
+    function renderVerdict(state){
+      const row=state.ui.verdict,ended=['done','error'].includes(state.status);
+      const view=Core.verdictRow(state.text?{verdict:state.verdict,gaps:ended?state.gaps:[]}:{},text);
+      const signature=JSON.stringify(view);if(row.verdictSignature===signature)return;
+      row.verdictSignature=signature;row.replaceChildren();row.hidden=view.empty;
+      if(view.verdict)row.setAttribute('data-verdict',view.verdict);else row.removeAttribute('data-verdict');
+      if(view.tentative)row.setAttribute('data-tentative','');else row.removeAttribute('data-tentative');
+      if(view.empty){row.removeAttribute('aria-label');return;}
+      row.setAttribute('aria-label',view.aria);
+      if(view.label){const badge=element('span','verdict-badge'),dot=element('span','verdict-dot');dot.setAttribute('aria-hidden','true');badge.append(dot,element('span','verdict-label',view.label));row.append(badge);}
+      if(view.gaps.length){const list=element('span','verdict-gaps',view.prefix);for(const gap of view.gaps){const item=element('span','',gap.label);item.title=gap.title;list.append(' · ',item);}row.append(list);}
     }
     function render(state){
       const binding=state.binding,ui=state.ui;
@@ -775,7 +794,7 @@
         if(options.render)options.render(ui.answer,state.text);else ui.answer.textContent=state.text;
         state.renderedText=state.text;renderSources(state);
       }
-      ui.answer.hidden=!state.text;
+      ui.answer.hidden=!state.text;renderVerdict(state);
       // Let the outer page/dialog scroll. A folded preview has no independent
       // scrollbar; expanding reveals the full answer in normal document flow.
       const long=ui.answer.scrollHeight>370||state.text.length>1000;
@@ -905,7 +924,7 @@
         state.recoveryStatus=state.status==='done'?'done':state.recoveryStatus||'error';
         state.input||=live;state.intent=false;state.status='error';state.errorKey=config.needsProvider||'status.needsKey';state.needsSettings=true;state.availabilityInterrupted=true;render(state);return;
       }
-      state.input=live;state.text='';state.renderedText=null;state.sources=[];state.usage=null;state.usageComplete=undefined;state.model='';state.searchRecorded=false;state.expanded=false;state.errorKey='';state.needsSettings=false;state.availabilityInterrupted=false;state.recoveryStatus=undefined;state.status='waking';
+      state.input=live;state.text='';state.verdict=undefined;state.gaps=undefined;state.renderedText=null;state.sources=[];state.usage=null;state.usageComplete=undefined;state.model='';state.searchRecorded=false;state.expanded=false;state.errorKey='';state.needsSettings=false;state.availabilityInterrupted=false;state.recoveryStatus=undefined;state.status='waking';
       state.intent=false;state.preparedImages=null;
       if(live.imageSources.length){
         const capture=new view.AbortController();state.capture=capture;render(state);
@@ -944,19 +963,19 @@
       if(message.type==='QUEUED')state.status='queued';
       if(message.type==='START'){state.status='running';state.errorKey='';}
       if(message.type==='UPDATE'){
-        state.status='running';if(typeof message.text==='string')state.text=Core.readerOutput(message.text).text.slice(0,30000);
+        state.status='running';if(typeof message.text==='string'){state.text=Core.readerOutput(message.text).text.slice(0,30000);state.verdict=message.verdict;}
         if(Array.isArray(message.sources)){state.sources=message.sources;renderSources(state);}
       }
       if(message.type==='RETRY_WAIT'){state.status='retry-wait';state.errorKey='';}
       if(message.type==='RESULT'){
         const result=message.result||{},reader=Core.readerOutput(result.text,{final:true});metadata(state,result);
-        state.text=reader.text.slice(0,30000);state.sources=Array.isArray(result.sources)?result.sources:state.sources;
+        state.text=reader.text.slice(0,30000);state.verdict=result.verdict;state.gaps=result.gaps;state.sources=Array.isArray(result.sources)?result.sources:state.sources;
         state.status=reader.kind==='content'&&!['failed','incomplete'].includes(result.verificationStatus)?'done':'error';
         const limit=Core.accountLimitReason?.(result.verificationFailure);
         state.errorKey=state.status==='error'?(limit?'account.'+limit:'draft.incomplete'):'';requests.delete(message.requestId);state.requestId=null;
       }
       if(message.type==='ERROR'){
-        const partial=message.partialResult;if(typeof partial?.text==='string')state.text=Core.readerOutput(partial.text).text.slice(0,30000);
+        const partial=message.partialResult;if(typeof partial?.text==='string'){state.text=Core.readerOutput(partial.text).text.slice(0,30000);state.verdict=partial.verdict;state.gaps=partial.gaps;}
         if(Array.isArray(partial?.sources))state.sources=partial.sources;
         metadata(state,partial);state.status='error';state.errorKey=message.code==='DRAFT_INVALID'?'draft.failed':options.errorKey?.(message.code,message.verificationFailure)||'draft.failed';
         state.needsSettings=Boolean(/^(?:NEEDS_KEY|OAUTH_|BUILD_NOT_|MODEL_UNSUPPORTED)/.test(message.code||''));

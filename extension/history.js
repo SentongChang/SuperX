@@ -39,7 +39,7 @@
     if (!displaySignatures.has(entry)) {
       const analysis = entry.analysis;
       displaySignatures.set(entry,JSON.stringify([entry.author,entry.url,entry.text,entry.comments,
-        analysis && [analysis.text,analysis.sources,analysis.verificationStatus,analysis.verificationStart,analysis.model,analysis.usageComplete,
+        analysis && [analysis.text,analysis.sources,analysis.verificationStatus,analysis.verificationStart,analysis.verdict,analysis.gaps,analysis.model,analysis.usageComplete,
           analysis.usage?.total_tokens,analysis.usage?.input_tokens,analysis.usage?.output_tokens]]));
     }
     return displaySignatures.get(entry);
@@ -69,6 +69,7 @@
         usageComplete:value.analysis.usageComplete === true,
       } : null;
       if(analysis) {
+        ({verdict:analysis.verdict,gaps:analysis.gaps} = Core.verdictView(value.analysis));
         const output=Core.readerOutput(analysis.text,{final:true});
         analysis.text=output.text;
         if(output.kind!=='content') {
@@ -100,11 +101,23 @@
       return null;
     }
     function number(value) {try {if (!numberFormatters.has(language)) numberFormatters.set(language,new Intl.NumberFormat(language));return numberFormatters.get(language).format(value);} catch {return String(value);}}
+    function renderVerdict(row,analysis) {
+      const view = core.verdictRow(analysis,t);
+      row.replaceChildren();row.hidden = view.empty;
+      if (view.verdict) row.setAttribute('data-verdict',view.verdict); else row.removeAttribute('data-verdict');
+      if (view.tentative) row.setAttribute('data-tentative',''); else row.removeAttribute('data-tentative');
+      if (view.empty) {row.removeAttribute('aria-label');return;}
+      row.setAttribute('aria-label',view.aria);
+      if (view.label) {const badge = element('span','verdict-badge'),dot = element('span','verdict-dot');dot.setAttribute('aria-hidden','true');badge.append(dot,element('span','verdict-label',view.label));row.append(badge);}
+      if (view.gaps.length) {const list = element('span','verdict-gaps',view.prefix);for (const gap of view.gaps) {const item = element('span','',gap.label);item.title = gap.title;list.append(' · ',item);}row.append(list);}
+    }
     function renderAnswer(target,entry) {
       target.replaceChildren();
       const analysis = entry.analysis;
       const labels = {entry,copyButtons:[]};
       if (analysis?.text) {
+        labels.verdict = element('div','verdict');labels.verdict.setAttribute('role','group');
+        renderVerdict(labels.verdict,analysis);target.append(labels.verdict);
         const metadata = element('p','answer-meta');
         const tokens = totalTokens(analysis.usage);
         if (tokens !== null) {labels.tokens = element('span','',t('history.tokens',{count:number(tokens) + (analysis.usageComplete ? '' : '+')}));metadata.append(labels.tokens);}
@@ -174,6 +187,7 @@
       if (row.noAnalysis) setText(row.noAnalysis,t(['incomplete','failed'].includes(entry.analysis?.verificationStatus)?'status.incomplete':'history.noAnalysis'));
       if (row.summary) setText(row.summary,t(row.details.open ? 'history.hideAnswer' : 'history.showAnswer'));
       const labels = row.answerLabels,analysis = entry.analysis;
+      if (labels?.verdict) renderVerdict(labels.verdict,analysis);
       if (labels?.tokens) setText(labels.tokens,t('history.tokens',{count:number(totalTokens(analysis.usage)) + (analysis.usageComplete ? '' : '+')}));
       if (labels?.model) setText(labels.model,t('history.model',{model:analysis.model}));
       if (labels?.warning) setText(labels.warning,t('history.previousAnswer'));

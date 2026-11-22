@@ -4207,3 +4207,25 @@ test('golden: OPEN_SETTINGS focus precedence for every requested focus and provi
     assert.deepEqual(opened,ids,provider);
   }
 });
+
+test('streamed verdicts are forwarded as an enum or null, and results keep verdict and gaps through the cache', async () => {
+  const bg = createBackground({ apiRun: async call => {
+    call.onUpdate({ text: 'First finding.', verdict: 'mixed', phase: 'verify', verificationStatus: 'running', sources: [] });
+    call.onUpdate({ text: 'Reset after a search.', verdict: 'confident', phase: 'verify', verificationStatus: 'running', sources: [] });
+    return { text: 'Final finding.', verdict: 'accurate', gaps: ['media', 'search'], sources: [], provider: 'api', searched: false, verificationStatus: 'unverified' };
+  } });
+  await bg.ready(); const port = bg.connect();
+  const result = await analyze(bg, port, 'verdict-stream');
+  assert.deepEqual(port.messages.filter(message => message.type === 'UPDATE').map(message => message.verdict), ['mixed', null]);
+  assert.equal(result.result.verdict, 'accurate'); assert.deepEqual(result.result.gaps, ['media', 'search']);
+  const cached = await analyze(bg, port, 'verdict-cached');
+  assert.equal(cached.cached, true); assert.equal(cached.result.verdict, 'accurate'); assert.deepEqual(cached.result.gaps, ['media', 'search']);
+});
+
+test('analysis passed back to the worker keeps only a valid verdict and known gaps', async () => {
+  const bg = createBackground(); await bg.ready(); const port = bg.connect();
+  await draftComments(bg, port, 'verdict-analysis', 100, { analysis: { text: 'Checked.', verdict: 'certainly', gaps: ['search', 'smell', 'text'] } });
+  assert.deepEqual(clone(bg.commentCalls[0].analysis), { text: 'Checked.', verificationStatus: '', warning: '', sources: [], gaps: ['text', 'search'] });
+  await draftComments(bg, port, 'verdict-analysis-valid', 101, { analysis: { text: 'Checked.', verdict: 'none' } });
+  assert.equal(bg.commentCalls[1].analysis.verdict, 'none'); assert.equal(Object.hasOwn(bg.commentCalls[1].analysis, 'gaps'), false);
+});
