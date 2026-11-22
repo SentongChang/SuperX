@@ -18,7 +18,7 @@
   const MAX_CONTINUATIONS = 2;
   const COMMENTS_SCHEMA = Object.freeze({type: 'object', properties: {comments: {type: 'array', items: {type: 'string'}}}, required: ['comments'], additionalProperties: false});
   // Opened pages are capped so the post's links cannot run up the bill.
-  const WEB_FETCH = Object.freeze({maxUses: 2, maxContentTokens: 6000, blockedDomains: Object.freeze(['x.com', 'twitter.com'])});
+  const WEB_FETCH = Object.freeze({maxUses: 2, maxContentTokens: 6000, blockedDomains: Object.freeze(['x.com', 'twitter.com', 't.co'])});
   const SEARCH_GUIDANCE = 'Your training data ends well before today\'s date. Records, office holders, prices, versions, rules and anything "latest" may have changed since then, so search for those before you answer, even when you feel sure. Facts that can\'t change need no search.';
 
   function profile(model) {

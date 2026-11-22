@@ -841,11 +841,13 @@
     return {...(links.length ? {links} : {}),
       ...(noteText ? {communityNote:{text:noteText, links:noteLinks.map(url => ({url}))}} : {})};
   }
-  // The pages Claude may open: the post's own links, never X itself.
+  // The pages Claude may open: the post's own links, never X itself. An
+  // unexpanded t.co address stays listed as context, but opening it would
+  // only pass through X's tracking redirect, so Claude's web_fetch blocks it.
   function fetchableLinks(post) {
     const urls = [...(Array.isArray(post?.links) ? post.links : []), ...(Array.isArray(post?.communityNote?.links) ? post.communityNote.links : [])]
       .map(link => linkURL(link?.url)).filter(Boolean);
-    return [...new Set(urls)].filter(url => !X_HOST.test(new URL(url).hostname));
+    return [...new Set(urls)].filter(url => { const host = new URL(url).hostname; return !X_HOST.test(host) && host !== 't.co'; });
   }
   // What Claude reads beyond the canonical URL. A newly shown note or link
   // must not be answered from a check that never saw it.

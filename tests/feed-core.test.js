@@ -617,7 +617,8 @@ test('the checked post lists its own outbound links, never mentions, hashtags or
   // Duplicates collapse, fragments are dropped and at most four are listed.
   assert.deepEqual(result.links, [{ url: 'https://example.com/a/b' }, { url: 'https://t.co/BBB' }, { url: 'https://news.example/1' },
     { url: 'https://x.com/other/status/55' }]);
-  assert.deepEqual(core.fetchableLinks(result), ['https://example.com/a/b', 'https://t.co/BBB', 'https://news.example/1']);
+  // An unexpanded t.co address is context only: Claude never opens X's redirect.
+  assert.deepEqual(core.fetchableLinks(result), ['https://example.com/a/b', 'https://news.example/1']);
   assert.equal(Object.hasOwn(core.extractPost(e('article', {}, [header('author', '11'), tweetText('No links.')])), 'links'), false);
 });
 
