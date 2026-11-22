@@ -1,6 +1,6 @@
 # Privacy and data handling
 
-This document describes SuperX 1.1.5, including custom post triggers and image inputs for published-post and manual draft checks through Grok subscription OAuth, API Key or official local Grok. Last updated: 2026-11-22. Draft text and supported attached images are sent only when you explicitly request a draft check. Release availability and platform-specific acceptance are documented separately in the [connection guide](docs/CONNECTIONS.md#acceptance-scope).
+This document describes SuperX 1.1.5, including custom post triggers and image inputs for published-post and manual draft checks through Grok subscription OAuth, API Key, official local Grok or a Claude API Key. Last updated: 2026-11-22. Draft text and supported attached images are sent only when you explicitly request a draft check. Release availability and platform-specific acceptance are documented separately in the [connection guide](docs/CONNECTIONS.md#acceptance-scope).
 
 ## Setup and control
 
@@ -34,6 +34,18 @@ The extension does not restrict analysis to public posts. **Protected posts, rep
 
 Direct-message and standalone Grok pages are excluded from analysis and history recording. The extension does not read X authentication cookies, access the browser's history of other sites or send X session credentials to xAI. Its separate, on-device history records supported X posts actually visible while SuperX and history recording are enabled, as described below. It does not post, reply, like or repost. Comment suggestions remain drafts; a click copies a selected draft through the browser clipboard API.
 
+## What is sent to Anthropic (Claude connection)
+
+SuperX sends requests to Anthropic only while **Claude API Key** is the selected connection. They go over HTTPS from the extension background worker directly to `api.anthropic.com`; the other connections never contact that host.
+
+- Each fact check or comment request carries the post context listed above: the canonical post URL, the displayed post text with its author and time, quoted posts, eligible X-hosted image URLs and their descriptions, the post's own links and link-card titles, and any Community Note text shown on the page. It also carries the selected model, effort, answer language, search limit and the effective fact-check instructions.
+- Web search runs on Anthropic's servers under Anthropic's terms. When the post has its own links, Claude can also open up to two of them with Anthropic's server-side web fetch; `x.com`, `twitter.com` and `t.co` are blocked for that tool. Anthropic retrieves those pages and the image URLs itself; SuperX does not fetch them for Claude.
+- When the Claude model is set to **Auto**, or when automatic checks and the pre-screen are both on, a short pre-screen request goes first to Claude Haiku 5.5 with no tools: the post text, author, language, up to two quoted posts, link URLs and titles, and up to two image URLs. Its cost is added to the same spending estimate.
+- The Claude Key is encrypted on this device with AES-GCM, in its own record (`claudeApiKeyEncrypted`) separate from any Grok Key, and is sent only to Anthropic as the request's `x-api-key` header. It is never sent to the X page.
+- Claude has no X access. It cannot search X or sign in to it, and SuperX sends no X cookies or session credentials to Anthropic.
+
+The spending estimate, request count and cycle dates (`claudeSpend`) stay in local extension storage. They are an estimate from the usage Anthropic reports; Claude Console is the authoritative record.
+
 ## Manual draft checks
 
 On supported X post/reply composers, **Check** sends the text snapshot and supported attached images present when you explicitly click that control. Only at that click does SuperX fetch the selected native upload previews (same-origin blob URLs or eligible X media previews); it does not inspect arbitrary local files or the clipboard. Up to four PNG/JPEG images with a combined image-file size of 8 MiB before base64 encoding are accepted, including an image-only draft. A failed, unsupported or oversized image stops that attempt with an error; SuperX does not silently send only the text. Draft video attachments are not uploaded as image inputs and remain unchecked. Typing, changing the text, opening the editor or expanding an existing result does not by itself send another draft-check request. Pausing automatic feed analysis or collapsing its rail does not prevent an explicitly requested draft check. The selected account's allowance, billing, searches and provider rules still apply.
@@ -46,11 +58,13 @@ SuperX displays findings below the composer without editing or submitting its co
 
 ## Third parties and network requests
 
-The project does not operate an API relay, analytics service or telemetry endpoint. That does not mean no data leaves your device: analysis and comment requests go to xAI, whose handling is governed by its own terms, policies and account configuration.
+The project does not operate an API relay, analytics service or telemetry endpoint. That does not mean no data leaves your device: analysis and comment requests go to xAI, or to Anthropic while the Claude connection is selected. Each provider's handling is governed by its own terms, policies and account configuration.
 
 SuperX's use and transfer of user data adheres to the Chrome Web Store User Data Policy, including its Limited Use requirements. Post content and related browsing activity are used only for factual-claim analysis, reply-drafting and on-device recent-history features and necessary caches; they are not used for advertising, data sales, credit decisions or unrelated profiling.
 
 API requests set `store: false` in the xAI Responses payload. This describes the extension's request option; **it is not a guarantee that xAI retains no request data, logs or tool inputs**. Review the provider's current policies for your account before using non-public or sensitive material.
+
+For the Claude connection, Anthropic's [commercial terms](https://www.anthropic.com/legal/commercial-terms) and [privacy policy](https://www.anthropic.com/legal/privacy) and your Claude Console organization's settings apply. SuperX does not check or configure Anthropic's retention or data-processing options, and a normal Key does not establish compliance with any requirement.
 
 xAI's account configuration and terms remain applicable. Its [API security documentation](https://docs.x.ai/developers/faq/security) describes default retention and optional team-wide ZDR; its [Data Processing Addendum](https://x.ai/legal/data-processing-addendum), effective September 22, 2026, separately requires ZDR-enabled processing for Personal Data. Public posts can contain Personal Data. SuperX does not check or configure these provider-side requirements, and a normal Key or `store: false` does not establish compliance. See also the [API Enterprise Terms](https://x.ai/legal/terms-of-service-enterprise).
 
@@ -72,6 +86,7 @@ Model-provided Markdown is parsed locally. SuperX does not execute model HTML or
 | Setup guide progress | A local record (`onboarding`) of whether the setup guide is pending, finished or skipped, with its version and time; it holds no credential or setting, is not uploaded or browser-synced and is removed with extension data |
 | Layout self-check | When X shows posts SuperX cannot read, the tab's report stays in browser-session storage (`layoutStates`) until the page recovers, reloads or closes: page kind, failure type, X's interface language and three counts (post links found, posts recognised, posts with an action bar), with no URL, account name, post ID or text. Dismissing the notice stores the extension version locally (`layoutNoticeDismissed`). Nothing is uploaded; **Report issue** opens a pre-filled GitHub issue only when clicked, for you to review before submitting |
 | Completed published-post analyses and comment suggestions | Answer cache, reused instead of a new request. By default kept for 1 day in unencrypted, restricted local extension storage (`answerCache`), so answers survive a browser restart with the same protection as browsing history; bounded to 120 entries and approximately 2 MB. Settings › Maintenance offers 7 days, or "Until the browser closes", which keeps answers only in browser-session storage (`cache`, 160 entries / approximately 4 MB) and nothing on disk. While browsing history is off, answers are kept only until the browser closes, whatever period is selected. Every period runs from when the answer was made, not from its last use. Manual draft checks and incomplete or failed answers are excluded |
+| Claude Key and spending estimate | The Claude Key as AES-GCM ciphertext in local extension storage (`claudeApiKeyEncrypted`) with its own non-extractable CryptoKey in extension IndexedDB, until cleared or replaced. The cycle's estimated spend, request count and start date (`claudeSpend`) in local extension storage until reset or removal of extension data |
 | Answer reuse count | Local extension storage (`answerCacheStats`): how many answers were reused, their reported tokens, the estimated dollars for API Key and Claude connections, and the date counting began. Counts only, with no post IDs, URLs or text; kept until Reset count or removal of extension data. Clearing the answer cache does not reset it |
 | Recent X browsing history | Unencrypted, restricted local extension storage (`superxHistory`), retained for 24 hours after each post's latest view across browser restart; bounded to 1,000 posts and approximately 6 MB |
 | Per-tab counters, collapse state and session interface language | Session extension storage |
@@ -128,7 +143,7 @@ History's separate 24-hour lifetime runs from the post's latest view. Expired en
 
 If a storage write fails, cache cleanup can be delayed. Expired entries still remain excluded from reuse in worker memory, and a later cache write retries without preventing the extension from starting. If moving answers off disk fails when the period changes, Settings reports it; Clear answer cache or the next startup removes the copy. Removal of a legacy local cache can also fail and should be retried by reopening the extension or clearing its data.
 
-There is no extension-level monetary budget or post-count cap. All visible eligible posts can trigger provider usage or paid work. Keep automatic analysis paused until you have configured a connection and reviewed the matching account's limits and billing.
+Grok connections have no extension-level monetary budget or post-count cap; the Claude connection's per-cycle spending limit is based on SuperX's own estimate. All visible eligible posts can trigger provider usage or paid work. Keep automatic analysis paused until you have configured a connection and reviewed the matching account's limits and billing.
 
 API Key and CLI / ACP transient failures in fact checks and comments retry after 3 seconds, up to 5 additional attempts per task, using the same selected provider, model and reasoning settings. Retries resend that task's context and can consume additional provider allowance or paid usage. Invalid credentials, account/balance restrictions, unsupported settings, output limits and unconfirmed local cancellation are not automatically retried. OAuth generation is never automatically replayed after an accepted HTTP 200 response, in-stream error, incomplete output or timeout. An initial HTTP 401 rejection can refresh authorization once and make one recovery request; another rejection requires sign-in. A failed task does not stop other posts. Started answers remain in memory when scrolling or X's timeline virtualization removes a post from view; returning to it restores the task instead of automatically starting it again. The page retains up to 100 inactive detached cards in addition to active requests, and discards them on navigation or page closure.
 
@@ -142,6 +157,7 @@ API Key and CLI / ACP transient failures in fact checks and comments retry after
 | `https://x.com/*`, `https://twitter.com/*` | Observe supported post elements, follow theme / language and show the result column; read a supported composer text/image snapshot when its Check control is explicitly clicked |
 | `https://api.x.ai/*` | Call the provider from the background worker |
 | `https://auth.x.ai/*` | Fixed OAuth device authorization, token exchange / refresh and revocation endpoints; newly added host access can require upgrade approval |
+| `https://api.anthropic.com/*` | Call Claude from the background worker, only while the Claude connection is selected |
 
 The extension does not request the browser's `cookies` or `history` permission or broad access to all websites. Its own recent history comes from visible supported X post elements, not the browser's global browsing-history database. Matching a site for content-script injection is broader than the actual supported analysis paths; the runtime excludes direct messages and standalone Grok / settings flows.
 

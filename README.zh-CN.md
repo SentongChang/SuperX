@@ -1,6 +1,6 @@
 # SuperX
 
-> **本 fork 新增：Claude API Key 连接方式**，可用 Claude Max 每月附带的 API 额度做事实核查；默认 Haiku 5.5、手动触发、带周期花费上限。说明见 [docs/CLAUDE.zh-CN.md](docs/CLAUDE.zh-CN.md)。
+> **本 fork 新增：Claude API Key 连接方式**，可用 Claude Max 每月附带的 API 额度做事实核查；默认固定 Haiku 5.5（「自动」选型需自行开启）、只在点击时核查、带周期花费上限，回答顶部显示结论行和来源标签。说明见 [docs/CLAUDE.zh-CN.md](docs/CLAUDE.zh-CN.md)。
 
 **读懂 X，边刷边核查。**
 

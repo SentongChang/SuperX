@@ -1,5 +1,7 @@
 # SuperX
 
+> **New in this fork: a Claude API Key connection** that fact-checks with your own Claude API credit, such as the monthly credit included with Claude Max. It defaults to Haiku 5.5 (Auto routing is opt-in), checks only when you click and stops at a per-cycle spending limit. See [the Claude section of the connection guide](docs/CONNECTIONS.md#claude-api-key).
+
 **Understand X. Fact-check as you scroll.**
 
 [Download 1.1.6](https://github.com/bwjoke/SuperX/releases/download/v1.1.6/SuperX.zip) · [Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo) · [Release notes](https://github.com/bwjoke/SuperX/releases/tag/v1.1.6) · [Website](https://superx.vip/) · [Support](https://github.com/bwjoke/SuperX/issues) · [简体中文](README.zh-CN.md) · [Privacy](PRIVACY.md)
