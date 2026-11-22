@@ -361,10 +361,11 @@ test('a modern post keeps the full address X hides inside a shortened link label
 
 test('layout self-check routes are an allow-list of post-list pages', () => {
   for (const [path, kind] of [['/home', 'home'], ['/a/status/1', 'status'], ['/a', 'profile'], ['/a/with_replies', 'profile'],
-    ['/search?q=moon', 'search'], ['/i/lists/1', 'list'], ['/i/bookmarks', 'bookmarks'], ['/home/', 'home']]) {
+    ['/search?q=moon', 'search'], ['/search?q=moon&f=live', 'search'], ['/i/lists/1', 'list'], ['/i/bookmarks', 'bookmarks'], ['/home/', 'home']]) {
     assert.equal(DOM.routeKind('https://x.com' + path), kind, path);
   }
-  for (const path of ['/messages', '/settings', '/explore', '/notifications', '/a/media', '/i/flow/login', '/', '/a/status/1/photo/1', '/compose/post', '/login']) {
+  for (const path of ['/messages', '/settings', '/explore', '/notifications', '/a/media', '/i/flow/login', '/', '/a/status/1/photo/1', '/compose/post', '/login',
+    '/search?q=moon&f=media']) {
     assert.equal(DOM.routeKind('https://x.com' + path), 'other', path);
   }
   assert.equal(DOM.routeKind('https://example.com/home'), 'other');
@@ -396,6 +397,13 @@ test('layout probe finds post links SuperX cannot read, only in the main column'
   const doc = documentWith(e('main', {}, [...items.map(item => item.row), nav, dialog, own, e('a', {href:'/a/status/100/photo/1'})]), sidebar);
   doc.location = {href:'https://x.com/home'};
   assert.deepEqual(DOM.layoutProbe(doc), {route:'home', signedOut:false, evidence:3, readable:0, withControls:0});
+});
+
+test('layout probe ignores media and sub-page links, as on a thumbnail grid', () => {
+  const grid = ['200', '201', '202', '203'].flatMap(id => [e('a', {href:`/a/status/${id}/photo/1`}), e('a', {href:`https://x.com/a/status/${id}/video/1`})]);
+  const extras = [e('a', {href:'/a/status/204/analytics'}), e('a', {href:'/i/web/status/205'}), e('a', {href:'/a/status/206?s=20'})];
+  const doc = documentWith(e('main', {}, [...grid, ...extras])); doc.location = {href:'https://x.com/home'};
+  assert.equal(DOM.layoutProbe(doc).evidence, 1);
 });
 
 test('layout probe stops counting permalinks at fifty', () => {

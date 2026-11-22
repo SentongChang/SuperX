@@ -4885,6 +4885,13 @@ test('a route change hides the layout notice at once and reports recovery',()=>{
   assert.deepEqual(page.layoutMessages().map(message=>message.report?.code||null),['posts',null]);
 });
 
+test('moving from a broken page to an unsupported one reports recovery',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.location.pathname='/messages';page.tick();page.probeLayout(1);
+  assert.deepEqual(page.layoutMessages().map(message=>message.report?.code||null),['posts',null]);
+  page.probeLayout(3);assert.equal(page.layoutMessages().length,2,'An unsupported page is never probed');
+});
+
 test('a missing post button is reported only when the button is in use',()=>{
   const buttons={...readableLayout,withControls:0};
   const automatic=layoutPage(buttons);automatic.configure();automatic.probeLayout(6);assert.deepEqual(automatic.layoutMessages(),[]);

@@ -1063,9 +1063,11 @@
     return null;
   }
 
-  // State per page: `code` is the confirmed failure on show, or null. Probes
-  // that carry no evidence either way break a failure streak but never clear
-  // a confirmed failure; only consecutive readable probes or a new page do.
+  // State per page: `code` is the confirmed failure on show, or null. A probe
+  // that shows neither a failure nor readable posts (an empty, signed-out or
+  // non-timeline view, such as another tab of the same search) breaks a
+  // failure streak but never clears a confirmed failure; only consecutive
+  // readable probes or a new page do.
   function layoutHealthStep(state, {page, probe, postButton}, now) {
     const current = state?.page === page ? state : {page, since:now, candidate:null, failStreak:0, okStreak:0, code:null, probe:null};
     const failure = layoutFailure(probe, {postButton});

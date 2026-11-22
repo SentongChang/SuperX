@@ -163,6 +163,7 @@ History is separate from the answer cache: **Clear answer cache**, clearing/repl
 | OAuth login expired or refresh uncertain | Sign in again in Settings; no saved API Key is substituted. Only approve the short code on the official authorization page |
 | Model list cannot load while connected | Read the specific warning and use the official usage link to check your account. An unavailable list alone does not prove that your allowance is exhausted; the last successful list is retained when available |
 | Unusual sidebar layout | Reload the extension and refresh X; report the page type, browser version and a redacted screenshot |
+| "SuperX can't read this X layout" | X changed how it shows posts or their action bars. Use **Report issue** to open a pre-filled GitHub issue with no page content. **Dismiss** hides the notice for both failure types until the next SuperX version; the popup line stays while the tab is affected |
 
 An answer with sources is not a guarantee of correctness. An incomplete fact check does not certify the post. Partial findings stay labelled incomplete during retries and after exhaustion; retry manually when appropriate.
 

@@ -351,7 +351,8 @@
     if (!/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(url.hostname)) return 'other';
     const path = url.pathname.replace(/\/+$/, '');
     if (path === '/home') return 'home';
-    if (path === '/search') return 'search';
+    // The Media tab is a thumbnail grid, not a list of posts.
+    if (path === '/search') return url.searchParams.get('f') === 'media' ? 'other' : 'search';
     if (path === '/i/bookmarks') return 'bookmarks';
     if (/^\/i\/lists\/\d+$/.test(path)) return 'list';
     if (/^\/[A-Za-z0-9_]{1,15}\/status\/\d+$/.test(path)) return 'status';
@@ -373,7 +374,13 @@
   // A cheap structural census for the layout self-check. Status permalinks are
   // the evidence that X shows posts; it is independent of how SuperX finds
   // articles, so a page SuperX cannot read still has a measurable post count.
+  // Only a bare /<handle>/status/<id> counts: media grids link every thumbnail
+  // to /photo/1 or /video/1 without showing any post.
   const probeLimits = Object.freeze({links:50, articles:20});
+  function permalinkID(href) {
+    if (!canonicalPostURL(href)) return '';
+    return new URL(href, 'https://x.com').pathname.match(/^\/[A-Za-z0-9_]{1,15}\/status\/(\d+)\/?$/)?.[1] || '';
+  }
   function layoutProbe(doc) {
     const nonContent = node => ownNode(node) || tag(node) === 'aside' || tag(node) === 'nav' || attr(node, 'role') === 'banner';
     const mains = all(doc, 'main, [role="main"]').filter(node => visible(node) && !inDialog(node));
@@ -381,7 +388,7 @@
     const ids = new Set();
     for (const scope of scopes) for (const anchor of all(scope, 'a[href]')) {
       if (ids.size >= probeLimits.links) break;
-      const id = canonicalPostURL(attr(anchor, 'href'))?.match(/\/status\/(\d+)$/)?.[1];
+      const id = permalinkID(attr(anchor, 'href'));
       if (id && !ids.has(id) && visible(anchor) && !inDialog(anchor) && outside(anchor, nonContent)) ids.add(id);
     }
     const sample = articles(doc).slice(0, probeLimits.articles).filter(article => postURL(article));

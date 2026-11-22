@@ -88,7 +88,7 @@
     .trigger-guide[hidden]{display:none!important;}.trigger-guide::before{content:'';position:absolute;top:-5px;left:var(--guide-arrow,200px);width:8px;height:8px;background:inherit;border-top:1px solid var(--gf-border,#2f3336);border-left:1px solid var(--gf-border,#2f3336);transform:rotate(45deg);}
     .trigger-guide[data-placement=above]::before{top:auto;bottom:-5px;transform:rotate(225deg);}.guide-copy{position:relative;margin:0;overflow-wrap:anywhere;text-wrap:balance;}.guide-dismiss{position:absolute;top:5px;right:5px;display:grid;place-items:center;box-sizing:border-box;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--gf-muted,#71767b);cursor:pointer;pointer-events:auto;font:400 18px/1 var(--gf-font,system-ui);}.guide-dismiss:hover{background:rgba(127,127,127,.12);color:var(--gf-fg,#e7e9ea);}.guide-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:1px;}
     .layout-notice{position:absolute;z-index:4;box-sizing:border-box;padding:12px 14px;border:1px solid var(--gf-border,#2f3336);border-radius:12px;background:var(--gf-bg,#000);color:var(--gf-fg,#e7e9ea);box-shadow:0 4px 20px rgba(0,0,0,.2);font:400 13px/18px var(--gf-font,system-ui);pointer-events:auto;}
-    .layout-notice[hidden]{display:none!important;}.layout-title{display:flex;align-items:center;gap:8px;font:700 15px/20px var(--gf-font,system-ui);overflow-wrap:anywhere;}.layout-title svg{flex:none;width:16px;height:16px;color:var(--gf-muted,#71767b);}
+    .layout-notice[hidden]{display:none!important;}.layout-title{display:flex;align-items:flex-start;gap:8px;font:700 15px/20px var(--gf-font,system-ui);overflow-wrap:anywhere;}.layout-title svg{flex:none;width:16px;height:16px;margin-block-start:2px;color:var(--gf-muted,#71767b);}
     .layout-body{margin:4px 0 0;padding-inline-start:24px;color:var(--gf-muted,#71767b);overflow-wrap:anywhere;}.layout-actions{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:10px;padding-inline-start:24px;}
     .layout-report{color:var(--gf-accent,#1d9bf0);font-weight:700;text-decoration:none;}.layout-report:hover{text-decoration:underline;}.layout-dismiss{padding:0;border:0;background:transparent;color:var(--gf-muted,#71767b);font:inherit;cursor:pointer;}.layout-dismiss:hover{color:var(--gf-fg,#e7e9ea);}
     .layout-report:focus-visible,.layout-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px;border-radius:2px;}
@@ -1496,8 +1496,11 @@
   }
   function probeLayout() {
     // Never judge a page the user cannot see, one covered by an X dialog, or
-    // one SuperX is not working on. Those probes simply do not happen.
-    if(document.hidden||pageSuspended||needsPageRefresh||!hasConfig||!settings.enabled||!supportedPage()||syncXModalVisibility())return;
+    // one SuperX is not working on. Those probes simply do not happen, but
+    // leaving a broken page for an unsupported one still ends its failure.
+    if(document.hidden||pageSuspended||needsPageRefresh||!hasConfig||!settings.enabled)return;
+    if(!supportedPage()){if(layoutState?.code){layoutState=null;scheduleLayout();reportLayout();}return;}
+    if(syncXModalVisibility())return;
     const previous=layoutState?.code||'';
     layoutState=Core.layoutHealthStep(layoutState,{page:pageRouteKey(),probe:DOM.layoutProbe(document),
       postButton:triggerMode()==='custom'&&settings.customTriggers.manual},Date.now());
