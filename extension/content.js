@@ -41,6 +41,9 @@
   const hoverChecks=new Map();
   let hoverBlockedUntil=0;
   let triggerGuideCompleted=false,triggerGuideCompletionPending=false,triggerGuideDismissed=false,triggerGuideEntry=null;
+  // Layout self-check: the current page's health, the failure code the worker
+  // last heard about from this port, and the version whose notice was dismissed.
+  let layoutState=null,layoutReported='',layoutNoticeDismissed='';
   const triggerMode=()=>Core.triggerMode(settings);
   const triggerPageURL=()=>new URL(location.pathname,location.href).href;
   const explicitRequest=request=>request?.task==='analysis'&&['manual','recheck'].includes(request.triggerKind);
@@ -59,7 +62,8 @@
   // articles remain untouched.
   const overlay = document.createElement('grok-first-overlay');
   overlay.id = 'grokfirst-overlay';
-  overlay.dataset.version=chrome.runtime.getManifest?.()?.version||'development';
+  const extensionVersion=chrome.runtime.getManifest?.()?.version||'development';
+  overlay.dataset.version=extensionVersion;
   const overlayShadow = overlay.attachShadow({mode:'open'});
   const overlayStyle = document.createElement('style');
   const symbolURL=chrome.runtime.getURL('assets/superx-symbol.svg');
@@ -83,6 +87,11 @@
     .trigger-guide{position:absolute;z-index:4;box-sizing:border-box;width:248px;max-width:calc(100vw - 24px);padding:12px 32px 12px 14px;border:1px solid var(--gf-border,#2f3336);border-radius:12px;background:var(--gf-bg,#000);color:var(--gf-fg,#e7e9ea);box-shadow:0 4px 20px rgba(0,0,0,.2);font:400 13px/1.5 var(--gf-font,system-ui);pointer-events:none;}
     .trigger-guide[hidden]{display:none!important;}.trigger-guide::before{content:'';position:absolute;top:-5px;left:var(--guide-arrow,200px);width:8px;height:8px;background:inherit;border-top:1px solid var(--gf-border,#2f3336);border-left:1px solid var(--gf-border,#2f3336);transform:rotate(45deg);}
     .trigger-guide[data-placement=above]::before{top:auto;bottom:-5px;transform:rotate(225deg);}.guide-copy{position:relative;margin:0;overflow-wrap:anywhere;text-wrap:balance;}.guide-dismiss{position:absolute;top:5px;right:5px;display:grid;place-items:center;box-sizing:border-box;width:24px;height:24px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--gf-muted,#71767b);cursor:pointer;pointer-events:auto;font:400 18px/1 var(--gf-font,system-ui);}.guide-dismiss:hover{background:rgba(127,127,127,.12);color:var(--gf-fg,#e7e9ea);}.guide-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:1px;}
+    .layout-notice{position:absolute;z-index:4;box-sizing:border-box;padding:12px 14px;border:1px solid var(--gf-border,#2f3336);border-radius:12px;background:var(--gf-bg,#000);color:var(--gf-fg,#e7e9ea);box-shadow:0 4px 20px rgba(0,0,0,.2);font:400 13px/18px var(--gf-font,system-ui);pointer-events:auto;}
+    .layout-notice[hidden]{display:none!important;}.layout-title{display:flex;align-items:center;gap:8px;font:700 15px/20px var(--gf-font,system-ui);overflow-wrap:anywhere;}.layout-title svg{flex:none;width:16px;height:16px;color:var(--gf-muted,#71767b);}
+    .layout-body{margin:4px 0 0;padding-inline-start:24px;color:var(--gf-muted,#71767b);overflow-wrap:anywhere;}.layout-actions{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;margin-top:10px;padding-inline-start:24px;}
+    .layout-report{color:var(--gf-accent,#1d9bf0);font-weight:700;text-decoration:none;}.layout-report:hover{text-decoration:underline;}.layout-dismiss{padding:0;border:0;background:transparent;color:var(--gf-muted,#71767b);font:inherit;cursor:pointer;}.layout-dismiss:hover{color:var(--gf-fg,#e7e9ea);}
+    .layout-report:focus-visible,.layout-dismiss:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px;border-radius:2px;}
     grok-first-card{position:absolute;z-index:1;display:block;box-sizing:border-box;pointer-events:auto;overflow:hidden;}
     grok-first-card[hidden]{display:none!important;}
   `;
@@ -106,7 +115,17 @@
   triggerGuide.hidden=true;triggerGuide.setAttribute('role','status');triggerGuide.setAttribute('aria-live','polite');guideDismiss.type='button';
   guideDismiss.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();triggerGuideDismissed=true;hideTriggerGuide();});
   triggerGuide.append(guideCopy,guideDismiss);
-  railHeader.append(railLanguageControl,railHistory,railOptions,railCollapse);overlayShadow.append(rail,railHeader,railExpand,railSeparators,triggerGuide);
+  const layoutNotice=node('section','layout-notice'),layoutTitle=node('strong','layout-title'),layoutTitleText=node('span'),layoutBody=node('p','layout-body');
+  const layoutActions=node('div','layout-actions'),layoutReport=node('a','layout-report'),layoutDismiss=node('button','layout-dismiss');
+  layoutNotice.hidden=true;layoutNotice.setAttribute('role','status');layoutNotice.setAttribute('aria-live','polite');
+  layoutReport.target='_blank';layoutReport.rel='noopener noreferrer';layoutDismiss.type='button';
+  layoutDismiss.addEventListener('click',event=>{
+    event.preventDefault();event.stopPropagation();
+    layoutNoticeDismissed=extensionVersion;layoutNotice.hidden=true;scheduleLayout();
+    postControl({type:'DISMISS_LAYOUT_NOTICE'});
+  });
+  layoutTitle.append(infoIcon(),layoutTitleText);layoutActions.append(layoutReport,layoutDismiss);layoutNotice.append(layoutTitle,layoutBody,layoutActions);
+  railHeader.append(railLanguageControl,railHistory,railOptions,railCollapse);overlayShadow.append(rail,railHeader,railExpand,railSeparators,triggerGuide,layoutNotice);
   refreshHeaderLanguage();
   document.body.append(overlay);
   let layoutFrame = null, themeDirty = true, themeSignature = '', themePrimary = null;
@@ -160,6 +179,7 @@
   connect();
   scheduleScan();
   setInterval(tick,100);
+  setInterval(probeLayout,Core.LAYOUT_HEALTH.probeMs);
   // A message, rather than an idle open port, keeps the MV3 worker alive during generation.
   setInterval(()=>{if((requests.size||draftComposer?.activeCount) && connected)post({type:'PING'});},15000);
   document.addEventListener('visibilitychange',()=>{
@@ -323,6 +343,7 @@
     railHistory.setAttribute('aria-label',t('common.history'));railHistory.title=t('common.history');
     railCollapse.setAttribute('aria-label',t('common.collapse'));railCollapse.title=t('tooltip.collapse');
     railExpand.setAttribute('aria-label',t('common.expand'));railExpand.title=t('tooltip.expand');
+    renderLayoutNotice();
     railHeader.title=settings.provider==='oauth'?t('oauth.modeLabel',{count:settings.apiConcurrency}):settings.provider==='claude'?t('claude.modeLabel',{count:settings.apiConcurrency}):settings.provider==='build'?t('popup.buildLabel',{transport:settings.buildTransport.toUpperCase()}):t('tooltip.apiMode',{count:settings.apiConcurrency});
   }
   function syncUILanguage() {
@@ -576,6 +597,8 @@
       });
       handshakeTimer=setTimeout(()=>{if(port===nextPort&&awaitingConfig)connectionLost(new Error('Background configuration timed out'),nextPort);},8000);
       post({type:'UI_LANGUAGE',language:xUILanguage});
+      // The worker forgets a tab's layout report on every new port.
+      layoutReported='';reportLayout();
     } catch(error){connectionLost(error);}
   }
   function handleMessage(message) {
@@ -584,6 +607,7 @@
       return;
     }
     if(message.type==='HISTORY_CONFIG') {configureHistory(message.enabled,message.epoch);return;}
+    if(message.type==='LAYOUT_NOTICE_STATE'){layoutNoticeDismissed=typeof message.dismissed==='string'?message.dismissed:'';scheduleLayout();return;}
     if(message.type==='HISTORY_ACK') {
       const batch=historyPending.get(message.batchId);if(!batch)return;
       historyPending.delete(message.batchId);
@@ -595,6 +619,7 @@
     if(message.type==='CONFIG') {
       hasConfig=true;awaitingConfig=true;workerSleeping=false;reconnectFailures=0;
       if(message.triggerGuideCompleted===true){triggerGuideCompleted=true;if(message.triggerGuidePersisted!==false)triggerGuideCompletionPending=false;hideTriggerGuide();}
+      if(typeof message.layoutNoticeDismissed==='string')layoutNoticeDismissed=message.layoutNoticeDismissed;
       clearTimeout(handshakeTimer);handshakeTimer=undefined;
       // Claude without opt-in automatic checks behaves like Custom mode with
       // only the post button enabled. Saved trigger choices are unchanged.
@@ -1223,11 +1248,12 @@
     const primaryRect=primary?.getBoundingClientRect(),nativeCells=syncNativeCells(primary,primaryRect);
     const bounds=Layout.railBounds(primaryRect,sidebar?.getBoundingClientRect(),viewport);
     rail.hidden=railHeader.hidden=railSeparators.hidden=bounds.hidden||collapsed;railExpand.hidden=bounds.hidden||!collapsed;
-    if(bounds.hidden){hideTriggerGuide();syncNativeHeaders();pauseUnseenRailQueue();for(const item of items)item.id.card.hidden=true;return;}
+    if(bounds.hidden){hideTriggerGuide();placeLayoutNotice(bounds,0,viewport);syncNativeHeaders();pauseUnseenRailQueue();for(const item of items)item.id.card.hidden=true;return;}
     syncTheme(primary);
     for(const entry of entries.values())syncPostControl(entry);
     const header=headerGeometry(primary,viewport),headerHeight=header.top+header.height;
-    syncTriggerGuide(headerHeight);
+    // One calm notice at a time: a layout problem outranks the button hint.
+    if(placeLayoutNotice(bounds,headerHeight,viewport))hideTriggerGuide();else syncTriggerGuide(headerHeight);
     railHeader.dataset.compact=String(bounds.width<310);
     railHeader.style.borderBottomWidth=header.borderWidth+'px';
     for(const [element,geometry] of [[rail,bounds],[railHeader,{...bounds,top:header.top,height:header.height}],[railExpand,{left:bounds.left,top:header.top,width:32,height:header.height}]])for(const name of ['left','top','width','height']) {
@@ -1467,6 +1493,48 @@
     if(kind!=='manual'&&entry.status!=='new'){if(entry.status==='done')completeTriggerGuide(kind);scheduleLayout();return;}
     // A skipped post has no answer to replace, so its first click is a check.
     submit(entry,kind==='manual'&&!['new','skipped'].includes(entry.status),kind,true);
+  }
+  function probeLayout() {
+    // Never judge a page the user cannot see, one covered by an X dialog, or
+    // one SuperX is not working on. Those probes simply do not happen.
+    if(document.hidden||pageSuspended||needsPageRefresh||!hasConfig||!settings.enabled||!supportedPage()||syncXModalVisibility())return;
+    const previous=layoutState?.code||'';
+    layoutState=Core.layoutHealthStep(layoutState,{page:pageRouteKey(),probe:DOM.layoutProbe(document),
+      postButton:triggerMode()==='custom'&&settings.customTriggers.manual},Date.now());
+    if((layoutState.code||'')===previous)return;
+    renderLayoutNotice();scheduleLayout();reportLayout();
+  }
+  function currentLayoutReport() {
+    return layoutState?.code?Core.layoutReport({...layoutState.probe,code:layoutState.code,language:xUILanguage}):null;
+  }
+  function reportLayout() {
+    // Only transitions reach the worker. A sleeping worker is woken, and the
+    // new port then carries the current state (see connect).
+    const code=layoutState?.code||'';
+    if(code===layoutReported)return;
+    if(connected){if(post({type:'LAYOUT_HEALTH',report:currentLayoutReport()}))layoutReported=code;}
+    else if(workerSleeping)connect();
+  }
+  function renderLayoutNotice() {
+    const report=currentLayoutReport();
+    if(!report)return;
+    layoutNotice.lang=uiLanguage;layoutNotice.dir=uiLanguage==='ar'?'rtl':'ltr';
+    layoutTitleText.textContent=t('layout.title');
+    layoutBody.textContent=t(report.code==='posts'?'layout.posts':'layout.actions');
+    layoutReport.textContent=t('layout.report');layoutDismiss.textContent=t('layout.dismiss');
+    layoutReport.href=Core.layoutIssueURL(report,{version:extensionVersion,userAgent:navigator.userAgent,now:Date.now()});
+  }
+  function placeLayoutNotice(bounds,headerHeight,viewport) {
+    // At the top of the rail; floating only when X's column (and so the rail)
+    // cannot be found. A narrow window or a collapsed rail shows nothing here.
+    let geometry=null;
+    if(layoutState?.code&&layoutState.page===pageRouteKey()&&settings.enabled&&!needsPageRefresh&&layoutNoticeDismissed!==extensionVersion){
+      if(!bounds.hidden&&!collapsed)geometry={left:bounds.left+12,top:headerHeight+12,width:bounds.width-24};
+      else if(bounds.reason==='invalid-primary'){const width=Math.min(300,viewport.width-32);geometry={left:viewport.width-16-width,top:64,width};}
+    }
+    layoutNotice.hidden=!geometry;
+    if(geometry)for(const [name,value] of Object.entries(geometry)){const px=value+'px';if(layoutNotice.style[name]!==px)layoutNotice.style[name]=px;}
+    return Boolean(geometry);
   }
   function hideTriggerGuide() {
     triggerGuide.hidden=true;triggerGuideEntry=null;
@@ -1989,6 +2057,12 @@
     svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
     path.setAttribute('d',direction==='left'?'M15 5l-7 7 7 7':direction==='right'?'M9 5l7 7-7 7':'M5 9l7 7 7-7');
     path.setAttribute('fill','none');path.setAttribute('stroke','currentColor');path.setAttribute('stroke-width','2');path.setAttribute('stroke-linecap','round');path.setAttribute('stroke-linejoin','round');svg.append(path);return svg;
+  }
+  function infoIcon(){
+    const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');
+    svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+    path.setAttribute('d','M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0M12 11v5M12 7.5v.01');
+    path.setAttribute('fill','none');path.setAttribute('stroke','currentColor');path.setAttribute('stroke-width','1.8');path.setAttribute('stroke-linecap','round');svg.append(path);return svg;
   }
   function gear(){
     const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),path=document.createElementNS(ns,'path');

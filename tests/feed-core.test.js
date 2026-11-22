@@ -2829,3 +2829,75 @@ test('answer cache retention defaults to 1 day on disk, accepts only its three p
   assert.equal(core.cacheRetention({answerCacheRetention:'7d'},false),core.CACHE_RETENTIONS.session);
   assert.equal(core.cacheRetention(undefined),core.CACHE_RETENTIONS['1d']);
 });
+
+const healthyProbe={route:'home',signedOut:false,evidence:5,readable:5,withControls:5};
+const brokenProbe={route:'home',signedOut:false,evidence:5,readable:0,withControls:0};
+test('layout failures need positive evidence on a signed-in post-list page',()=>{
+  assert.equal(core.layoutFailure(brokenProbe),'posts');
+  assert.equal(core.layoutFailure({...brokenProbe,evidence:2}),null,'Fewer than three permalinks is too little evidence');
+  assert.equal(core.layoutFailure({...brokenProbe,route:'other'}),null);
+  assert.equal(core.layoutFailure({...brokenProbe,signedOut:true}),null);
+  assert.equal(core.layoutFailure({...brokenProbe,evidence:0}),null,'An empty or loading page is never a failure');
+  const noButtons={...healthyProbe,withControls:0};
+  assert.equal(core.layoutFailure(noButtons),null,'A post button the user does not use is not reported');
+  assert.equal(core.layoutFailure(noButtons,{postButton:true}),'actions');
+  assert.equal(core.layoutFailure({...noButtons,readable:2},{postButton:true}),null);
+  assert.equal(core.layoutFailure({...healthyProbe,withControls:1},{postButton:true}),null);
+});
+
+test('a layout failure shows only after the page settles and repeats, and clears after two healthy probes',()=>{
+  const {probeMs,settleMs}=core.LAYOUT_HEALTH;
+  const step=(state,probe,at,extra={})=>core.layoutHealthStep(state,{page:'/home',probe,...extra},at);
+  let state=null,at=0;
+  for(let index=0;index<5;index++){state=step(state,brokenProbe,at);at+=1000;}
+  assert.equal(state.code,null,'Five quick failures inside the settle time are not enough');
+  state=step(state,brokenProbe,settleMs);assert.equal(state.code,'posts');
+  assert.deepEqual(core.layoutReport({...state.probe,code:state.code}),{code:'posts',route:'home',evidence:5,readable:0,withControls:0,language:''});
+
+  state=null;
+  for(let index=0;index<3;index++)state=step(state,brokenProbe,index*probeMs);
+  assert.equal(state.code,null,'Three probes 2.5 s apart are still inside the settle time');
+  state=step(state,brokenProbe,settleMs);assert.equal(state.code,'posts');
+  state=step(state,{...healthyProbe,evidence:0,readable:0},settleMs+probeMs);assert.equal(state.code,'posts','A loading probe keeps the notice');
+  state=step(state,healthyProbe,settleMs+2*probeMs);assert.equal(state.code,'posts');
+  state=step(state,healthyProbe,settleMs+3*probeMs);assert.equal(state.code,null);
+  assert.equal(state.probe,null);
+});
+
+test('layout health restarts its streak on a changed failure or interruption, and resets on a new page',()=>{
+  const {settleMs}=core.LAYOUT_HEALTH,broken=(state,at,probe=brokenProbe,page='/home')=>core.layoutHealthStep(state,{page,probe,postButton:true},at);
+  let state=broken(null,0);state=broken(state,settleMs);
+  state=broken(state,settleMs+1,{...healthyProbe,withControls:0});
+  assert.equal(state.failStreak,1);assert.equal(state.candidate,'actions');
+  state=broken(state,settleMs+2,{...healthyProbe,evidence:1,readable:0});
+  assert.equal(state.failStreak,0,'An inconclusive probe breaks the streak');
+  for(let index=0;index<3;index++)state=broken(state,settleMs+3+index);
+  assert.equal(state.code,'posts');
+  state=broken(state,settleMs+10,{...brokenProbe,route:'other'});assert.equal(state.code,'posts','A skipped probe on the same page keeps the notice');
+  state=broken(state,settleMs+11,brokenProbe,'/explore');
+  assert.equal(state.code,null);assert.equal(state.since,settleMs+11);assert.equal(state.page,'/explore');
+});
+
+test('layout reports keep only allow-listed diagnostic fields',()=>{
+  const report=core.layoutReport({code:'actions',route:'status',evidence:900,readable:-3,withControls:1.5,language:'pt-BR',url:'https://x.com/Writer/status/1',text:'Claim'});
+  assert.deepEqual(report,{code:'actions',route:'status',evidence:50,readable:0,withControls:0,language:'pt-BR'});
+  assert.equal(core.layoutReport({code:'composer',route:'home'}),null);
+  assert.equal(core.layoutReport({code:'posts',route:'messages'}),null);
+  assert.equal(core.layoutReport({code:'posts',route:'home',language:'<script>'}).language,'');
+});
+
+test('the layout issue link targets the repository issue tracker and carries no page content',()=>{
+  const pkg=JSON.parse(fs.readFileSync(path.join(__dirname,'../package.json'),'utf8'));
+  assert.equal(core.ISSUES_URL,pkg.bugs.url);
+  const href=core.layoutIssueURL({code:'posts',route:'status',evidence:4,readable:0,withControls:0,language:'en',url:'https://x.com/Writer/status/8000000000000000100',handle:'Writer',text:'Claim text'},
+    {version:'1.1.6',userAgent:'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',now:Date.UTC(2026,10,22,23)});
+  const url=new URL(href);
+  assert.equal(url.origin+url.pathname,pkg.bugs.url+'/new');
+  assert.equal(url.searchParams.get('title'),'X layout not readable: posts');
+  assert.equal(url.searchParams.get('body'),['No page content is included.','','SuperX version: 1.1.6','Browser: Edge 131','Page: status','Failure: posts',
+    'Post links found: 4','Posts recognised: 0','Posts with an action bar: 0','X language: en','Date: 2026-11-22'].join('\n'));
+  assert.doesNotMatch(href,/Writer|8000000000000000100|Claim|x\.com/);
+  const chrome=new URL(core.layoutIssueURL({code:'actions',route:'home'},{version:'<b>',userAgent:'Chrome/130.1',now:0})).searchParams.get('body');
+  assert.match(chrome,/SuperX version: unknown\nBrowser: Chrome 130\n/);assert.match(chrome,/X language: unknown/);
+  assert.equal(core.layoutIssueURL({code:'posts',route:'other'},{version:'1',userAgent:'',now:0}),'');
+});

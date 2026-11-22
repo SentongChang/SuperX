@@ -341,6 +341,55 @@
     return {anchor, reference, header, peer:grok ? more : null};
   }
 
+  // Page kinds that list posts SuperX promises to read. Anything else, such as
+  // messages, settings, notifications or a profile's media tab, is 'other'.
+  const reservedPaths = new Set(['home', 'explore', 'notifications', 'messages', 'settings', 'i', 'compose', 'search',
+    'login', 'logout', 'signup', 'tos', 'privacy', 'jobs', 'premium']);
+  function routeKind(value) {
+    let url;
+    try { url = new URL(value, 'https://x.com'); } catch (_) { return 'other'; }
+    if (!/^(?:www\.)?(?:x\.com|twitter\.com)$/i.test(url.hostname)) return 'other';
+    const path = url.pathname.replace(/\/+$/, '');
+    if (path === '/home') return 'home';
+    if (path === '/search') return 'search';
+    if (path === '/i/bookmarks') return 'bookmarks';
+    if (/^\/i\/lists\/\d+$/.test(path)) return 'list';
+    if (/^\/[A-Za-z0-9_]{1,15}\/status\/\d+$/.test(path)) return 'status';
+    const profile = path.match(/^\/([A-Za-z0-9_]{1,15})(?:\/with_replies)?$/);
+    return profile && !reservedPaths.has(profile[1].toLowerCase()) ? 'profile' : 'other';
+  }
+
+  const ownNode = node => /^(?:superx-|grok-first-)/.test(tag(node));
+  function outside(node, excluded) {
+    for (let current = node; current; current = current.parentElement) if (excluded(current)) return false;
+    return true;
+  }
+
+  function signedOut(doc) {
+    return all(doc, 'a[href="/login"], a[href^="/i/flow/login"], a[href^="/i/flow/signup"], [data-testid="loginButton"], [data-testid="signupButton"]')
+      .some(node => visible(node) && outside(node, ownNode));
+  }
+
+  // A cheap structural census for the layout self-check. Status permalinks are
+  // the evidence that X shows posts; it is independent of how SuperX finds
+  // articles, so a page SuperX cannot read still has a measurable post count.
+  const probeLimits = Object.freeze({links:50, articles:20});
+  function layoutProbe(doc) {
+    const nonContent = node => ownNode(node) || tag(node) === 'aside' || tag(node) === 'nav' || attr(node, 'role') === 'banner';
+    const mains = all(doc, 'main, [role="main"]').filter(node => visible(node) && !inDialog(node));
+    const scopes = mains.length ? mains : [doc?.body].filter(Boolean);
+    const ids = new Set();
+    for (const scope of scopes) for (const anchor of all(scope, 'a[href]')) {
+      if (ids.size >= probeLimits.links) break;
+      const id = canonicalPostURL(attr(anchor, 'href'))?.match(/\/status\/(\d+)$/)?.[1];
+      if (id && !ids.has(id) && visible(anchor) && !inDialog(anchor) && outside(anchor, nonContent)) ids.add(id);
+    }
+    const sample = articles(doc).slice(0, probeLimits.articles).filter(article => postURL(article));
+    return {route:routeKind(doc?.location?.href || ''), signedOut:signedOut(doc), evidence:ids.size,
+      readable:sample.length, withControls:sample.filter(article => controls(article)).length};
+  }
+
   return Object.freeze({editorSelector, isEditor, form, primary, sidebar, articles, isModern, shell, row,
-    postURL, bodyNodes, bodyExpanders, lineClamped, mainTextTruncated, authorNode, quoteRoots, owns, pageHeader, controls});
+    postURL, bodyNodes, bodyExpanders, lineClamped, mainTextTruncated, authorNode, quoteRoots, owns, pageHeader, controls,
+    routeKind, signedOut, layoutProbe});
 });

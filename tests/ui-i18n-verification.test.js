@@ -394,3 +394,14 @@ test('answer cache settings ship in every interface language with the same place
   assert.equal(ui.t('options.cacheStats','en',{hits:12,date:'Nov 3, 2026'}),'Answers reused since Nov 3, 2026: 12');
   assert.match(ui.t('options.cacheHelp','zh-CN'),/复用计数/);
 });
+
+test('layout self-check copy ships in every interface language without placeholders or "verify" wording',()=>{
+  const keys=['layout.title','layout.posts','layout.actions','layout.report','layout.dismiss','layout.popup'];
+  for(const language of ui.SUPPORTED_LANGUAGES)for(const key of keys){
+    const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+    assert.doesNotMatch(value,/\{\w+\}/,`${language}: ${key}`);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en[key],`${language}: ${key}`);
+  }
+  for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
+  assert.equal(ui.t('layout.title','en'),"SuperX can't read this X layout");assert.equal(ui.t('layout.report','zh-CN'),'报告问题');
+});

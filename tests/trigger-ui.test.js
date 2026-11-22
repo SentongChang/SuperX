@@ -2,14 +2,14 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 const Core=require('../extension/feed-core.js'),UI=require('../extension/ui-i18n.js');
 
-function popupFixture({provider='oauth',ready=false,mode='automatic',failure=false,language='en',customTriggers}={}){
+function popupFixture({provider='oauth',ready=false,mode='automatic',failure=false,language='en',customTriggers,layoutHealth}={}){
   const elements=new Map(),storageListeners=[],runtimeListeners=[],messages=[];
   const html=fs.readFileSync(path.join(__dirname,'../extension/popup.html'),'utf8');
   for(const match of html.matchAll(/<[a-z][^>]*\bid="([^"]+)"[^>]*>/g))elements.set(match[1],{checked:false,disabled:false,hidden:false,dataset:{},textContent:'',listeners:{},addEventListener(type,fn){this.listeners[type]=fn;}});
   const document={documentElement:{},getElementById:id=>elements.get(id),querySelectorAll:()=>[]};
   let settings=Core.normalizeSettings({...Core.DEFAULT_SETTINGS,provider,triggerMode:mode,customTriggers:customTriggers||{...Core.DEFAULT_SETTINGS.customTriggers,postHover:true,postHoverMs:2700},language:'ja'});
-  const config=()=>({ok:true,settings,ready,keyState:'missing',oauthStatus:{state:'disconnected',connected:false},buildStatus:{errorCode:'BUILD_NOT_CONNECTED'}});
-  const chrome={runtime:{onMessage:{addListener:fn=>runtimeListeners.push(fn)},async sendMessage(message){
+  const config=()=>({ok:true,settings,ready,keyState:'missing',oauthStatus:{state:'disconnected',connected:false},buildStatus:{errorCode:'BUILD_NOT_CONNECTED'},...(layoutHealth?{layoutHealth}:{})});
+  const chrome={runtime:{getManifest:()=>({version:'1.1.6'}),onMessage:{addListener:fn=>runtimeListeners.push(fn)},async sendMessage(message){
     messages.push(message);
     if(message.type==='GET_UI_LANGUAGE')return {ok:true,language};
     if(message.type==='GET_CONFIG')return config();
@@ -20,7 +20,7 @@ function popupFixture({provider='oauth',ready=false,mode='automatic',failure=fal
     if(['OPEN_SETTINGS','OPEN_HISTORY'].includes(message.type))return {ok:true};
     throw Error('Unexpected message '+message.type);
   }},storage:{local:{async get(){return {uiLanguage:language};}},onChanged:{addListener:fn=>storageListeners.push(fn)}}};
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/popup.js'),'utf8'),{XGrokCore:Core,GrokFirstUI:UI,document,chrome,navigator:{language},console});
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/popup.js'),'utf8'),{XGrokCore:Core,GrokFirstUI:UI,document,chrome,navigator:{language,userAgent:'Mozilla/5.0 Chrome/131.0.0.0'},console});
   return {elements,messages,document,settings:()=>settings,emitConfig(value){settings=Core.normalizeSettings({...settings,...value});runtimeListeners.forEach(fn=>fn({...config(),type:'CONFIG'}));},choose(mode){for(const name of ['automatic','custom','paused'])elements.get('trigger-mode-'+name).checked=name===mode;elements.get('trigger-mode-'+mode).listeners.change();}};
 }
 const settle=async()=>{for(let i=0;i<3;i++)await new Promise(resolve=>setImmediate(resolve));};
@@ -135,4 +135,20 @@ test('golden: popup provider label, automatic hint, blocked reason and Settings 
     p.elements.get('options').listeners.click();await settle();
     assert.equal(p.messages.findLast(message=>message.type==='OPEN_SETTINGS').focus,focus,provider);
   }
+});
+
+test('the popup shows one layout line with a report link only while the active tab is unreadable',async()=>{
+  const healthy=popupFixture({ready:true});await settle();
+  assert.equal(healthy.elements.get('layout-notice').hidden,true);
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const p=popupFixture({ready:true,layoutHealth:report});await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,false);
+  const link=new URL(p.elements.get('layout-report').href);
+  assert.equal(link.origin+link.pathname,'https://github.com/bwjoke/SuperX/issues/new');
+  assert.match(link.searchParams.get('body'),/SuperX version: 1\.1\.6\nBrowser: Chrome 131\nPage: home\nFailure: posts/);
+  p.emitConfig({});await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,false,'A broadcast snapshot keeps the tab state');
+  p.choose('paused');await settle();
+  assert.equal(p.elements.get('layout-notice').hidden,true,'Nothing is reported while paused');
+  assert.equal(p.messages.some(message=>/LAYOUT/.test(message.type)),false);
 });

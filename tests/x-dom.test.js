@@ -358,3 +358,48 @@ test('a modern post keeps the full address X hides inside a shortened link label
   assert.deepEqual(result.links, [{url:'https://example.com/a/b/c?id=2'}]);
   assert.deepEqual(result.communityNote, {text:'Readers added context.', links:[]});
 });
+
+test('layout self-check routes are an allow-list of post-list pages', () => {
+  for (const [path, kind] of [['/home', 'home'], ['/a/status/1', 'status'], ['/a', 'profile'], ['/a/with_replies', 'profile'],
+    ['/search?q=moon', 'search'], ['/i/lists/1', 'list'], ['/i/bookmarks', 'bookmarks'], ['/home/', 'home']]) {
+    assert.equal(DOM.routeKind('https://x.com' + path), kind, path);
+  }
+  for (const path of ['/messages', '/settings', '/explore', '/notifications', '/a/media', '/i/flow/login', '/', '/a/status/1/photo/1', '/compose/post', '/login']) {
+    assert.equal(DOM.routeKind('https://x.com' + path), 'other', path);
+  }
+  assert.equal(DOM.routeKind('https://example.com/home'), 'other');
+});
+
+test('signed-out pages are recognised only by a visible sign-in control outside SuperX', () => {
+  const login = e('a', {href:'/login'}, [], 'Log in'), doc = documentWith(e('main', {}, [login]));
+  assert.equal(DOM.signedOut(doc), true);
+  login.computed = {display:'none'};
+  assert.equal(DOM.signedOut(doc), false);
+  assert.equal(DOM.signedOut(documentWith(e('superx-post-check', {}, [e('a', {href:'/i/flow/signup'})]))), false);
+  assert.equal(DOM.signedOut(documentWith(e('div', {'data-testid':'loginButton'}))), true);
+});
+
+test('layout probe counts readable posts and their action bars on the modern timeline', () => {
+  const items = ['100', '101', '102'].map(id => post(id));
+  const doc = documentWith(e('main', {}, [e('div', {id:'urt:home:for-you'}, [e('ul', {}, items.map(item => item.row))])]));
+  doc.location = {href:'https://x.com/home'};
+  assert.deepEqual(DOM.layoutProbe(doc), {route:'home', signedOut:false, evidence:3, readable:3, withControls:3});
+  for (const item of items) item.actions.children.length = 0;
+  assert.equal(DOM.layoutProbe(doc).withControls, 0);
+});
+
+test('layout probe finds post links SuperX cannot read, only in the main column', () => {
+  const items = ['100', '101', '102'].map(id => post(id));
+  for (const item of items) item.article.tagName = 'DIV';
+  const sidebar = e('aside', {}, [e('a', {href:'/trend/status/900'})]), nav = e('nav', {}, [e('a', {href:'/nav/status/901'})]);
+  const dialog = e('div', {role:'dialog'}, [e('a', {href:'/modal/status/902'})]), own = e('superx-post-check', {}, [e('a', {href:'/own/status/903'})]);
+  const doc = documentWith(e('main', {}, [...items.map(item => item.row), nav, dialog, own, e('a', {href:'/a/status/100/photo/1'})]), sidebar);
+  doc.location = {href:'https://x.com/home'};
+  assert.deepEqual(DOM.layoutProbe(doc), {route:'home', signedOut:false, evidence:3, readable:0, withControls:0});
+});
+
+test('layout probe stops counting permalinks at fifty', () => {
+  const links = Array.from({length:80}, (_, index) => e('a', {href:`/a/status/${1000 + index}`}));
+  const doc = documentWith(e('main', {}, links)); doc.location = {href:'https://x.com/home'};
+  assert.equal(DOM.layoutProbe(doc).evidence, 50);
+});

@@ -75,6 +75,10 @@
     $("provider-hint").hidden = mode==="custom"&&!claude;
     $("provider-hint").textContent = claude&&mode!=="paused"?claudeHint():mode==="custom"?"":ui.t(mode==="automatic"?(oauth?"popup.oauthHint":build?"popup.buildHint":"popup.apiHint"):"trigger.pausedHelp",uiLanguage);
     renderTriggerSummary(mode);
+    // Shown even after the page notice was dismissed; never while paused.
+    const issue=loaded&&mode!=="paused"&&config.layoutHealth?core.layoutIssueURL(config.layoutHealth,{version:chrome.runtime.getManifest().version,userAgent:navigator.userAgent,now:Date.now()}):"";
+    $("layout-notice").hidden=!issue;
+    if(issue)$("layout-report").href=issue;
     for(const choice of triggerModes){const input=$("trigger-mode-"+choice);input.checked=choice===mode;input.disabled=busy||!loaded;}
     $("options").hidden = false;
     $("status").textContent = errorMessage ? ui.t(errorMessage.key,uiLanguage,{error:errorMessage.error}) : "";
@@ -129,7 +133,8 @@
     if (message?.type === "UI_LANGUAGE_CHANGED") { localeRevision++;applyLanguage(message.language); }
     if(message?.type==="OAUTH_STATUS_CHANGED"&&currentSettings.provider==="oauth"&&!busy){busy=true;void load();}
     if(message?.type==="CONFIG"&&message.settings&&typeof message.ready==="boolean"&&!busy){
-      config=message;currentSettings=core.normalizeSettings(message.settings);loaded=true;
+      // Broadcast snapshots omit the tab-specific layout state.
+      config={...message,layoutHealth:config.layoutHealth};currentSettings=core.normalizeSettings(message.settings);loaded=true;
       uiLanguage=ui.resolveLanguage(currentSettings.interfaceLanguage,observedUILanguage);render();
     }
   });

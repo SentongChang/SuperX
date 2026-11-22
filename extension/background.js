@@ -13,6 +13,9 @@ const runningJobs = new Set();
 const apiSlots = new Set();
 let queue = [], pumping = false, settings, cache = {}, quotas = {}, railStates = {}, revision = 0, cacheEpoch = 0;
 let triggerGuideCompleted = false, triggerGuidePersisted = false, triggerGuideWrite;
+// Layout self-check: each X tab's last broken-layout report (browser session
+// only), and the extension version whose page notice the user dismissed.
+let layoutStates = {}, layoutStateWrites = Promise.resolve(), layoutNoticeDismissed = '';
 let uiLanguage = UI.browserLanguage(globalThis);
 let apiDiagnostics = [], apiDiagnosticsEpoch = 0, apiDiagnosticsReady = Promise.resolve(), apiDiagnosticsWrites = Promise.resolve();
 let quotaWrites = Promise.resolve(), cacheWrites = Promise.resolve(), railStateWrites = Promise.resolve(), uiLanguageWrites = Promise.resolve();
@@ -43,15 +46,16 @@ async function initialize() {
   await chrome.storage.session.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
   // Onboarding state is optional UI data; a read failure must not prevent Key
   // restoration or generation. It is independent of saved analysis settings.
-  const guideReady=chrome.storage.local.get('triggerGuideCompleted').then(value=>{
+  const guideReady=chrome.storage.local.get(['triggerGuideCompleted','layoutNoticeDismissed']).then(value=>{
     triggerGuideCompleted=value.triggerGuideCompleted===true;
     triggerGuidePersisted=triggerGuideCompleted;
+    if(typeof value.layoutNoticeDismissed==='string')layoutNoticeDismissed=value.layoutNoticeDismissed;
   }).catch(()=>{});
   // Diagnostic storage is optional. Its reads/writes never gate credentials,
   // analysis or normal extension startup.
   apiDiagnosticsReady=loadAPIDiagnostics();
   const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend',LOCAL_CACHE_KEY,CACHE_STATS_KEY,SuperXHistoryStore.ENABLED_KEY]);
-  const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','claudeTriageCache','securityFault','apiBudgetPause','apiCapacityPause']);
+  const session = await chrome.storage.session.get(['quotas','railStates','layoutStates','uiLanguage','apiKey','cache','claudeTriageCache','securityFault','apiBudgetPause','apiCapacityPause']);
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
@@ -100,7 +104,7 @@ async function initialize() {
   const stored=await chrome.storage.local.get(['apiKey','apiKeyEncrypted','apiKeyVault']);
   hasSavedKey=KeyStore.envelopePresent(stored.apiKeyEncrypted)||validKey(stored.apiKey)||stored.apiKeyVault!==undefined;
   credentialReady=validKey(session.apiKey);
-  triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};
+  triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};layoutStates = session.layoutStates || {};
   await restoreCache(local[LOCAL_CACHE_KEY],session.cache);
   // Delete the old persistent post cache without reading or migrating its data.
   await chrome.storage.local.remove('cache');
@@ -332,7 +336,7 @@ async function publicConfig() {
   const status=securityStatus();
   const historyConfig=history.config();
   if(settings.provider==='build')ensureBuildStatus();
-  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},...(settings.provider==='claude'?{claudeStatus:claudeSpendSummary()}:{}),historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
+  return {settings,taskRevision:revision,triggerGuideCompleted,triggerGuidePersisted,layoutNoticeDismissed,ready:providerAllowsCalls(),keyState:status.keyState,credentialIdentity:settings.provider==='oauth'?oauthCredentialIdentity:'',oauthStatus:oauthFeedStatus(),apiBudgetPaused:false,apiCapacityPaused:false,...(settings.provider==='build'?{buildStatus:{...buildStatus,ready:buildReady()}}:{}),buildConnection:{configured:validBuildSecret(buildSecret),port:settings.buildPort},...(settings.provider==='claude'?{claudeStatus:claudeSpendSummary()}:{}),historyEnabled:historyConfig.enabled,historyEpoch:historyConfig.epoch};
 }
 function broadcastTriggerGuideState() {
   for(const client of clients)send(client.port,{type:'TRIGGER_GUIDE_STATE',completed:triggerGuideCompleted,persisted:triggerGuidePersisted});
@@ -369,14 +373,32 @@ async function broadcastConfig() {
   for(const client of clients)send(client.port,{type:'CONFIG',...config,used:quotas[client.tabId]||0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});
   void chrome.runtime.sendMessage({type:'CONFIG',...config,oauthStatus:oauth.status()}).catch(()=>{});
 }
+async function activeFeedTab() {
+  const tabs=await chrome.tabs.query({active:true,lastFocusedWindow:true});
+  return tabs.find(tab=>isFeed(tab.pendingUrl||tab.url));
+}
 async function currentUILanguage() {
   try {
-    const tabs=await chrome.tabs.query({active:true,lastFocusedWindow:true});
-    const active=tabs.find(tab=>isFeed(tab.pendingUrl||tab.url));
+    const active=await activeFeedTab();
     const client=active&&[...clients].find(value=>value.tabId===active.id);
     if(client)return client.uiLanguage;
   } catch { /* The last reported public UI locale remains available. */ }
   return uiLanguage;
+}
+async function activeLayoutHealth() {
+  try { const active=await activeFeedTab();return active&&layoutStates[active.id]||null; }
+  catch { return null; }
+}
+function setLayoutState(tabId,report) {
+  if(!report&&!layoutStates[tabId])return;
+  if(report)layoutStates[tabId]=report;else delete layoutStates[tabId];
+  layoutStateWrites=layoutStateWrites.then(()=>chrome.storage.session.set({layoutStates:{...layoutStates}})).catch(()=>{});
+}
+function dismissLayoutNotice() {
+  layoutNoticeDismissed=chrome.runtime.getManifest().version;
+  for(const client of clients)send(client.port,{type:'LAYOUT_NOTICE_STATE',dismissed:layoutNoticeDismissed});
+  // Display-only preference; a failed write only means it can show again.
+  void chrome.storage.local.set({layoutNoticeDismissed}).catch(()=>{});
 }
 function updateUILanguage(client,value) {
   client.uiLanguage=UI.normalizeLanguage(value);uiLanguage=client.uiLanguage;
@@ -771,7 +793,11 @@ async function openHistory(){await chrome.tabs.create({url:chrome.runtime.getURL
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== 'GROKFIRST_FEED' || port.sender?.frameId !== 0 || !isFeed(port.sender?.url)) { port.disconnect(); return; }
   const client = {port,tabId:port.sender.tab.id,pageUrl:port.sender.url,cancelEpoch:0,uiLanguage:null,requestCancellations:new Map(),reusedAnswers:new Set()}; clients.add(client);
-  ready.then(async()=>{client.uiLanguage=UI.normalizeLanguage(client.uiLanguage || uiLanguage);send(port,{type:'CONFIG',...await publicConfig(),used:quotas[client.tabId] || 0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});}).catch(()=>send(port,{type:'FATAL',error:'扩展初始化失败，请重新加载扩展。'}));
+  ready.then(async()=>{
+    // A new port is a new page or a woken worker; the page re-reports a
+    // broken layout itself, so an older report must not outlive its page.
+    setLayoutState(client.tabId,null);
+    client.uiLanguage=UI.normalizeLanguage(client.uiLanguage || uiLanguage);send(port,{type:'CONFIG',...await publicConfig(),used:quotas[client.tabId] || 0,collapsed:Boolean(railStates[client.tabId]),uiLanguage:client.uiLanguage});}).catch(()=>send(port,{type:'FATAL',error:'扩展初始化失败，请重新加载扩展。'}));
   port.onMessage.addListener(message=>{
     const receivedEpoch=client.cancelEpoch,receivedRevision=revision,receivedCredentialGeneration=securityGeneration,receivedBuildGeneration=buildConnectionGeneration,receivedOAuthGeneration=oauthGeneration;
     const messageRequestId=String(message.requestId || '').slice(0,80);
@@ -804,6 +830,8 @@ chrome.runtime.onConnect.addListener(port => {
         if(trustedFeed(port.sender))completeTriggerGuide();
         return;
       }
+      if(message.type==='LAYOUT_HEALTH'){if(trustedFeed(port.sender))setLayoutState(client.tabId,Core.layoutReport(message.report));return;}
+      if(message.type==='DISMISS_LAYOUT_NOTICE'){if(trustedFeed(port.sender))dismissLayoutNotice();return;}
       if(message.type==='UI_LANGUAGE') { await updateUILanguage(client,message.language);return; }
       if(message.type==='CANCEL_ALL') { cancelClient(client); return; }
       if(message.type==='OPEN_SETTINGS') { await openSettings(message.focus); return; }
@@ -1468,7 +1496,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     if(message.type==='SAVE_BUILD_CONNECTION')return queueBuildConnection(message);
     if(message.type==='CLEAR_BUILD_CONNECTION')return queueBuildConnection(message,true);
     if(message.type==='GET_BUILD_STATUS')return checkBuildDraft(message);
-    if(message.type==='GET_CONFIG'){if(settings.provider==='build')await refreshBuildStatus();return {ok:true,...await publicConfig(),oauthStatus:oauth.status()};}
+    if(message.type==='GET_CONFIG'){if(settings.provider==='build')await refreshBuildStatus();return {ok:true,...await publicConfig(),oauthStatus:oauth.status(),layoutHealth:await activeLayoutHealth()};}
     if(message.type==='GET_API_DIAGNOSTICS')return getAPIDiagnostics();
     if(message.type==='CLEAR_API_DIAGNOSTICS')return clearAPIDiagnostics();
     if(message.type==='GET_HISTORY'||message.type==='GET_HISTORY_STATUS'){
@@ -1522,7 +1550,7 @@ chrome.permissions?.onRemoved?.addListener(removed=>{
   }).catch(()=>{});
 });
 chrome.tabs.onRemoved.addListener(tabId=>{
-  ready.then(async()=>{delete quotas[tabId];delete railStates[tabId];await Promise.all([persistQuotas(),persistRailStates()]);});
+  ready.then(async()=>{delete quotas[tabId];delete railStates[tabId];setLayoutState(tabId,null);await Promise.all([persistQuotas(),persistRailStates()]);});
   for(const client of clients) if(client.tabId===tabId) cancelClient(client);
 });
 chrome.tabs.onUpdated?.addListener((tabId,change,tab)=>{

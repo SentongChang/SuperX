@@ -99,7 +99,7 @@ test('the rail history icon opens local history independently of analysis readin
 
 // The fake DOM records writes to the actual X nodes while giving the extension
 // its own shadow roots. Geometry arithmetic is covered by overlay-layout.test.
-function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='miss',modern=false}={}) {
+function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='miss',modern=false,layoutProbe}={}) {
   const writes = [], nodes = [], timeouts = new Map(), frames = new Map(), intervals = [];
   const intersectionObservers = [], mutationObservers = [], resizeObservers = [];
   const copied=[];let copyFailure=false;
@@ -270,7 +270,7 @@ function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='mis
   const context = vm.createContext({
     document, window, location, URL, URLSearchParams, AbortController, crypto, Date: ClockDate,
     innerWidth: 1440, innerHeight: 960,
-    XGrokCore: { ...core, extractPost: article => {postExtractions++;return article.postData ? ({ ...article.postData }) : null;} }, GrokFirstOverlayLayout: layout,
+    XGrokCore: { ...core, extractPost: article => {postExtractions++;return article.postData ? ({ ...article.postData }) : null;}, ...(layoutProbe?{DOM:{...core.DOM,layoutProbe}}:{}) }, GrokFirstOverlayLayout: layout,
     chrome: { runtime: { id: 'test-extension', connect: () => {connectAttempts++;if(connectFailure)throw connectFailure;return port;}, getURL: asset => `chrome-extension://test-extension/${asset}`,
       onMessage:{addListener(){nativeHooks.messageListeners++;}},
       async sendMessage(message){runtimeMessages.push(message);if(runtimeFailure)throw runtimeFailure;return {ok:true};}
@@ -330,6 +330,7 @@ function fixture({postCount=2,connectError=null,historyAck=true,cacheLookup='mis
     },
     intersect() { for (const observer of intersectionObservers) observer.callback(articles.filter(article => article.isConnected).map(target => ({ target, isIntersecting: true }))); harness.flush(); },
     tick(ms = 0) { now += ms; for (const interval of intervals) if (interval.delay === 100) interval.fn(); harness.flush(); },
+    probeLayout(count = 1) { for (let index = 0; index < count; index++) { now += core.LAYOUT_HEALTH.probeMs; for (const interval of intervals) if (interval.delay === core.LAYOUT_HEALTH.probeMs) interval.fn(); harness.flush(); } },
     elapse(ms) { now+=ms;for(const [id,timer] of [...timeouts])if(timer.at<=now){timeouts.delete(id);timer.fn();}harness.flush(); },
     scroll(delta) { for (const article of articles) { article.rect.top -= delta; article.rect.bottom -= delta; } window.emit('scroll'); document.emit('scroll'); harness.flush(); },
     resize(width) { context.innerWidth = width; window.visualViewport.width = width; window.emit('resize'); for (const observer of resizeObservers) observer.callback([]); harness.flush(); },
@@ -4839,4 +4840,101 @@ test('a reused answer an hour old or more keeps its age in view beside the cache
     assert.equal(status.textContent,ui.t('status.cached','zh-CN')+' · '+(label?label+' · ':'')+ui.t('status.searched','zh-CN'),String(age));
     assert.equal(status.hidden,!label,'A recent reuse leaves its provenance to the usage details');
   }
+});
+
+const unreadableLayout={route:'home',signedOut:false,evidence:6,readable:0,withControls:0};
+const readableLayout={route:'home',signedOut:false,evidence:6,readable:6,withControls:6};
+function layoutPage(initial=unreadableLayout){
+  const state={probe:initial},page=fixture({postCount:1,layoutProbe:()=>({...state.probe})});
+  page.layout=value=>{state.probe=value;};
+  page.notice=()=>page.nodes.find(node=>node.className==='layout-notice');
+  page.layoutMessages=()=>JSON.parse(JSON.stringify(page.port.sent.filter(message=>message.type==='LAYOUT_HEALTH')));
+  return page;
+}
+
+test('healthy, empty and unprobed pages never report layout health',()=>{
+  for(const probe of [readableLayout,{...readableLayout,evidence:0,readable:0,withControls:0},{...unreadableLayout,signedOut:true},{...unreadableLayout,route:'other'}]){
+    const page=layoutPage(probe);page.configure();page.probeLayout(12);
+    assert.deepEqual(page.layoutMessages(),[],JSON.stringify(probe));assert.equal(page.notice().hidden,true);
+  }
+  const page=fixture({postCount:2});page.configure();page.intersect();page.tick();page.probeLayout(12);
+  assert.equal(page.port.sent.some(message=>message.type==='LAYOUT_HEALTH'),false,'The real probe finds no evidence on a page without permalinks');
+});
+
+test('an unreadable layout shows one rail notice after settling and reports each transition once',()=>{
+  const page=layoutPage();page.configure();
+  page.probeLayout(4);assert.equal(page.notice().hidden,true,'Four probes 7.5 s apart are still inside the settle time');
+  page.probeLayout(1);
+  const notice=page.notice();assert.equal(notice.hidden,false);
+  assert.equal(notice.querySelector('.layout-title').textContent,ui.t('layout.title','zh-CN'));
+  assert.equal(notice.querySelector('.layout-body').textContent,ui.t('layout.posts','zh-CN'));
+  assert.equal(notice.style.top,(53+12)+'px');assert.equal(notice.style.left,(870+12)+'px');assert.equal(notice.style.width,(380-24)+'px');
+  const link=new URL(notice.querySelector('.layout-report').href);
+  assert.equal(link.origin+link.pathname,'https://github.com/bwjoke/SuperX/issues/new');assert.match(link.searchParams.get('body'),/Failure: posts\nPost links found: 6\nPosts recognised: 0/);
+  assert.deepEqual(page.layoutMessages(),[{type:'LAYOUT_HEALTH',report:{code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'zh-CN'}}]);
+  page.probeLayout(5);assert.equal(page.layoutMessages().length,1,'A continuing failure is not repeated');
+  page.layout(readableLayout);page.probeLayout(1);assert.equal(page.notice().hidden,false);
+  page.probeLayout(1);assert.equal(page.notice().hidden,true);
+  assert.deepEqual(page.layoutMessages().at(-1),{type:'LAYOUT_HEALTH',report:null});assert.equal(page.layoutMessages().length,2);
+});
+
+test('a route change hides the layout notice at once and reports recovery',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);assert.equal(page.notice().hidden,false);
+  page.location.pathname='/explore';page.tick();assert.equal(page.notice().hidden,true);
+  page.layout({...unreadableLayout,route:'other'});page.probeLayout(1);
+  assert.deepEqual(page.layoutMessages().map(message=>message.report?.code||null),['posts',null]);
+});
+
+test('a missing post button is reported only when the button is in use',()=>{
+  const buttons={...readableLayout,withControls:0};
+  const automatic=layoutPage(buttons);automatic.configure();automatic.probeLayout(6);assert.deepEqual(automatic.layoutMessages(),[]);
+  const page=layoutPage(buttons);page.configure({triggerMode:'custom',customTriggers:{...core.DEFAULT_CUSTOM_TRIGGERS,manual:true}});page.probeLayout(5);
+  assert.equal(page.notice().querySelector('.layout-body').textContent,ui.t('layout.actions','zh-CN'));
+  assert.equal(page.layoutMessages()[0].report.code,'actions');
+});
+
+test('dismissing the layout notice hides it for this extension version in every tab',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.notice().querySelector('.layout-dismiss').emit('click');page.flush();
+  assert.equal(page.notice().hidden,true);assert.equal(page.port.sent.filter(message=>message.type==='DISMISS_LAYOUT_NOTICE').length,1);
+  page.probeLayout(3);assert.equal(page.notice().hidden,true);
+  page.port.onMessage.emit({type:'LAYOUT_NOTICE_STATE',dismissed:'0.9.0'});page.flush();assert.equal(page.notice().hidden,false,'A dismissal from another version does not apply');
+  const other=layoutPage();other.port.onMessage.emit({type:'CONFIG',settings:{...core.DEFAULT_SETTINGS,provider:'api'},ready:true,layoutNoticeDismissed:'development'});other.flush();
+  other.probeLayout(5);assert.equal(other.notice().hidden,true);assert.equal(other.layoutMessages().length,1,'The popup still learns about a dismissed failure');
+});
+
+test('the layout notice stays out of a collapsed rail, X dialogs and a paused page',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.nodes.find(node=>node.className==='rail-collapse').emit('click');page.flush();assert.equal(page.notice().hidden,true);
+  page.nodes.find(node=>node.className==='rail-expand').emit('click');page.flush();assert.equal(page.notice().hidden,false);
+  const {portal}=xModal(page);page.mutate([{type:'childList',target:page.document.body}]);
+  assert.equal(page.nodes.find(node=>node.id==='grokfirst-overlay').hidden,true);
+  page.layout(readableLayout);page.probeLayout(3);assert.equal(page.layoutMessages().length,1,'No probe runs under an X dialog');
+  portal.remove();page.mutate([{type:'childList',target:page.document.body}]);
+
+  const paused=layoutPage();paused.configure({triggerMode:'paused'});paused.probeLayout(6);
+  assert.deepEqual(paused.layoutMessages(),[]);assert.equal(paused.notice().hidden,true);
+});
+
+test('the layout notice floats only when X’s column cannot be found',()=>{
+  const page=layoutPage();page.configure();page.probeLayout(5);
+  page.primary.removeAttribute('data-testid');page.mutate();
+  const notice=page.notice();assert.equal(notice.hidden,false);
+  assert.deepEqual([notice.style.top,notice.style.left,notice.style.width],['64px',(1440-16-300)+'px','300px']);
+  const narrow=layoutPage();narrow.resize(700);narrow.configure();narrow.probeLayout(5);
+  assert.equal(narrow.notice().hidden,true,'A narrow window leaves the popup line as the only signal');assert.equal(narrow.layoutMessages().length,1);
+});
+
+test('a reconnecting page re-reports a broken layout, and a sleeping worker is woken for a transition',()=>{
+  // Click-only triggers keep the page idle, so the worker may go to sleep.
+  const clickOnly={triggerMode:'custom',customTriggers:{manual:true,buttonHover:false,postHover:false,detailMain:false,detailReplies:false}};
+  const page=layoutPage();page.configure(clickOnly);page.probeLayout(5);
+  const first=page.replacePort();first.onDisconnect.emit();page.flush();
+  assert.equal(page.connectionAttempts(),1,'An idle disconnect does not reconnect by itself');
+  page.layout(readableLayout);page.probeLayout(2);
+  assert.equal(page.connectionAttempts(),2,'Recovery wakes the worker so the popup line clears');
+  assert.deepEqual(page.port.sent.filter(message=>message.type==='LAYOUT_HEALTH'),[],'The new port starts clean and a healthy page sends nothing');
+  page.configure(clickOnly);page.layout(unreadableLayout);page.probeLayout(5);
+  const broken=page.replacePort();broken.onDisconnect.emit();page.flush();page.nodes.find(node=>node.className==='rail-settings').emit('click');page.flush();
+  assert.equal(page.port.sent.find(message=>message.type==='LAYOUT_HEALTH')?.report?.code,'posts');
 });

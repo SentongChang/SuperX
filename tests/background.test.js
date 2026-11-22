@@ -97,6 +97,7 @@ function createBackground(options = {}) {
   const runtime = {
     id: 'grokfirst-test', onConnect: event(), onMessage: event(),
     getURL: file => `chrome-extension://grokfirst-test/${file}`,
+    getManifest: () => ({ version: '1.1.6' }),
     async sendMessage(message) { runtimeMessages.push(clone(message)); return {ok:true}; },
     async openOptionsPage() { if(options.openOptionsPage)await options.openOptionsPage(harness); }
   };
@@ -4573,4 +4574,51 @@ test('troubleshooting logs keep their 24 hour lifetime whatever the answer reten
   const entry=age=>({recordedAt:1800000000000-age,code:'API_ERROR',requestDiagnostics:safeRequestDiagnostics});
   const bg=createBackground({settings:{answerCacheRetention:'7d'},session:{apiRequestDiagnostics:[entry(60*60*1000),entry(25*60*60*1000)]}});await bg.ready();
   const log=await readDiagnostics(bg);assert.equal(log.retentionHours,24);assert.deepEqual(log.entries.map(value=>value.recordedAt),[1800000000000-60*60*1000]);
+});
+
+test('layout health is kept per tab with allow-listed fields and offered to the popup for the active tab',async()=>{
+  const bg=createBackground();await bg.ready();
+  bg.tabs.set(8,{id:8,url:'https://x.com/Writer',active:false,windowId:1,status:'complete'});
+  const port=bg.connect(),other=bg.connect({sender:{id:bg.chrome.runtime.id,frameId:0,url:'https://x.com/Writer',tab:{id:8}}});
+  await until(()=>port.messages.some(m=>m.type==='CONFIG')&&other.messages.some(m=>m.type==='CONFIG'));
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null);
+  port.send({type:'LAYOUT_HEALTH',report:{code:'posts',route:'home',evidence:999,readable:0,withControls:0,language:'en',url:'https://x.com/Writer/status/1',text:'Claim'}});
+  other.send({type:'LAYOUT_HEALTH',report:{code:'actions',route:'profile',evidence:4,readable:4,withControls:0,language:'en'}});
+  const expected={code:'posts',route:'home',evidence:50,readable:0,withControls:0,language:'en'};
+  await until(()=>bg.session.data.layoutStates?.[8]);
+  assert.deepEqual((await bg.message({type:'GET_CONFIG'})).layoutHealth,expected);
+  assert.deepEqual(bg.session.data.layoutStates,{7:expected,8:{code:'actions',route:'profile',evidence:4,readable:4,withControls:0,language:'en'}});
+  port.send({type:'LAYOUT_HEALTH',report:{code:'composer',route:'home'}});
+  await until(()=>!bg.session.data.layoutStates[7]);assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null,'Unknown codes are dropped');
+  port.send({type:'LAYOUT_HEALTH',report:expected});await until(()=>bg.session.data.layoutStates[7]);
+  port.send({type:'LAYOUT_HEALTH',report:null});await until(()=>!bg.session.data.layoutStates[7]);
+  bg.chrome.tabs.onRemoved.emit(8);await until(()=>!bg.session.data.layoutStates[8]);
+  assert.equal(port.messages.some(m=>m.type==='LAYOUT_NOTICE_STATE'),false);assert.equal(bg.apiCalls.length,0);
+});
+
+test('a layout report survives a sleeping worker but not a new page in its tab',async()=>{
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const bg=createBackground({session:{layoutStates:{7:report}}});await bg.ready();
+  assert.deepEqual((await bg.message({type:'GET_CONFIG'})).layoutHealth,report,'A woken worker still knows about the tab');
+  const port=bg.connect();await until(()=>port.messages.some(m=>m.type==='CONFIG'));
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null,'A new port starts clean; a broken page reports again');
+  assert.deepEqual(bg.session.data.layoutStates,{});
+  const untrusted=bg.connect({sender:{id:'other-extension',frameId:0,url:'https://x.com/home',tab:{id:7}}});
+  untrusted.send({type:'LAYOUT_HEALTH',report});untrusted.send({type:'DISMISS_LAYOUT_NOTICE'});await tick();await tick();
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutHealth,null);assert.equal(bg.local.data.layoutNoticeDismissed,undefined);
+});
+
+test('dismissing the layout notice is remembered for this extension version and broadcast to every tab',async()=>{
+  const bg=createBackground({local:{layoutNoticeDismissed:'1.1.5'}});await bg.ready();
+  const a=bg.connect(),b=bg.connect({sender:{id:bg.chrome.runtime.id,frameId:0,url:'https://x.com/home',tab:{id:8}}});
+  await until(()=>a.messages.some(m=>m.type==='CONFIG')&&b.messages.some(m=>m.type==='CONFIG'));
+  assert.equal(a.messages.find(m=>m.type==='CONFIG').layoutNoticeDismissed,'1.1.5');
+  const configs=b.messages.filter(m=>m.type==='CONFIG').length;
+  a.send({type:'DISMISS_LAYOUT_NOTICE'});
+  await until(()=>b.messages.some(m=>m.type==='LAYOUT_NOTICE_STATE'));
+  assert.deepEqual(b.messages.find(m=>m.type==='LAYOUT_NOTICE_STATE'),{type:'LAYOUT_NOTICE_STATE',dismissed:'1.1.6'});
+  assert.equal(b.messages.filter(m=>m.type==='CONFIG').length,configs,'A display preference does not reconfigure live triggers');
+  await until(()=>bg.local.data.layoutNoticeDismissed==='1.1.6');
+  assert.equal((await bg.message({type:'GET_CONFIG'})).layoutNoticeDismissed,'1.1.6');
+  assert.equal(Object.hasOwn(bg.local.data.settings,'layoutNoticeDismissed'),false);
 });

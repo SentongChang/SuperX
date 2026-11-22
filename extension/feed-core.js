@@ -1046,6 +1046,66 @@
       (Array.isArray(post.quotedContext) ? post.quotedContext : []).map(nativePostIdentity)]) : '';
   }
 
+  // Layout self-check. A notice needs positive evidence that X shows posts
+  // SuperX cannot read, repeated over several probes after the page settles.
+  // Empty, loading, signed-out and non-timeline pages are never evidence.
+  const LAYOUT_HEALTH = Object.freeze({probeMs:2500, settleMs:8000, confirm:3, recover:2, minEvidence:3, minButtonSample:3, maxCount:50});
+  const LAYOUT_CODES = Object.freeze(['posts', 'actions']);
+  const LAYOUT_ROUTES = Object.freeze(['home', 'status', 'profile', 'search', 'list', 'bookmarks']);
+  // Must equal package.json bugs.url; a test keeps the two in step.
+  const ISSUES_URL = 'https://github.com/bwjoke/SuperX/issues';
+
+  function layoutFailure(probe, {postButton = false} = {}) {
+    if (!probe || !LAYOUT_ROUTES.includes(probe.route) || probe.signedOut) return null;
+    if (probe.evidence >= LAYOUT_HEALTH.minEvidence && probe.readable === 0) return 'posts';
+    // A missing post button matters only to someone who uses it.
+    if (postButton && probe.readable >= LAYOUT_HEALTH.minButtonSample && probe.withControls === 0) return 'actions';
+    return null;
+  }
+
+  // State per page: `code` is the confirmed failure on show, or null. Probes
+  // that carry no evidence either way break a failure streak but never clear
+  // a confirmed failure; only consecutive readable probes or a new page do.
+  function layoutHealthStep(state, {page, probe, postButton}, now) {
+    const current = state?.page === page ? state : {page, since:now, candidate:null, failStreak:0, okStreak:0, code:null, probe:null};
+    const failure = layoutFailure(probe, {postButton});
+    if (failure) {
+      const failStreak = failure === current.candidate ? current.failStreak + 1 : 1;
+      const confirmed = failStreak >= LAYOUT_HEALTH.confirm && now - current.since >= LAYOUT_HEALTH.settleMs;
+      return {...current, candidate:failure, failStreak, okStreak:0, code:confirmed ? failure : current.code, probe:confirmed ? probe : current.probe};
+    }
+    const healthy = Boolean(probe) && LAYOUT_ROUTES.includes(probe.route) && !probe.signedOut && probe.readable > 0;
+    const okStreak = healthy ? current.okStreak + 1 : 0;
+    const code = okStreak >= LAYOUT_HEALTH.recover ? null : current.code;
+    return {...current, candidate:null, failStreak:0, okStreak, code, probe:code ? current.probe : null};
+  }
+
+  // The only fields a layout report may carry: no URL, handle, ID or text.
+  function layoutReport(value) {
+    if (!value || !LAYOUT_CODES.includes(value.code) || !LAYOUT_ROUTES.includes(value.route)) return null;
+    const count = number => Number.isSafeInteger(number) ? Math.min(Math.max(number, 0), LAYOUT_HEALTH.maxCount) : 0;
+    return {code:value.code, route:value.route, evidence:count(value.evidence), readable:count(value.readable),
+      withControls:count(value.withControls), language:/^[a-z]{2,3}(?:-[A-Z]{2})?$/.test(value.language) ? value.language : ''};
+  }
+
+  function layoutIssueURL(value, {version, userAgent, now}) {
+    const report = layoutReport(value);
+    if (!report) return '';
+    const agent = String(userAgent || ''), edge = agent.match(/\bEdg\/(\d+)/), chrome = agent.match(/\bChrome\/(\d+)/);
+    const browser = edge ? 'Edge ' + edge[1] : chrome ? 'Chrome ' + chrome[1] : 'Other';
+    const body = ['No page content is included.', '',
+      'SuperX version: ' + (/^[\w.-]{1,32}$/.test(version) ? version : 'unknown'),
+      'Browser: ' + browser,
+      'Page: ' + report.route,
+      'Failure: ' + report.code,
+      'Post links found: ' + report.evidence,
+      'Posts recognised: ' + report.readable,
+      'Posts with an action bar: ' + report.withControls,
+      'X language: ' + (report.language || 'unknown'),
+      'Date: ' + new Date(now).toISOString().slice(0, 10)].join('\n');
+    return ISSUES_URL + '/new?' + new URLSearchParams({title:'X layout not readable: ' + report.code, body});
+  }
+
   function visibilityEligibility(rect, viewport, options) {
     const view = typeof viewport === 'number' ? { height: viewport } : viewport || {};
     const settings = options || {};
@@ -1114,5 +1174,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
 });

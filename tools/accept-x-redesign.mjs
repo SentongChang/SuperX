@@ -89,6 +89,22 @@ try{
   await capture(page,'modern-feed');
   await context.close();
 
+  {
+    // Layout self-check: a notice needs the page to settle (8 s) and three
+    // failing probes 2.5 s apart, so wait in real time for all scenes at once.
+    const scenes=await Promise.all(['unknown-layout','unknown-actions','feed'].map(async scene=>({scene,...await open(scene)})));
+    await scenes[0].page.waitForTimeout(13500);
+    for(const {scene,context,page} of scenes){
+      const notice=await page.locator('#grokfirst-overlay').evaluate(overlay=>{const node=overlay.shadowRoot.querySelector('.layout-notice');return {hidden:node.hidden,title:node.querySelector('.layout-title').textContent,body:node.querySelector('.layout-body').textContent,href:node.querySelector('.layout-report').href};});
+      const reports=(await sent(page,'LAYOUT_HEALTH')).map(message=>message.report?.code||null);
+      if(scene==='feed'){check('healthy feed shows no layout notice and reports nothing',notice.hidden&&reports.length===0,{notice,reports});await context.close();continue;}
+      const link=new URL(notice.href||'about:blank');
+      check(scene+': layout notice appears once the failure is confirmed',!notice.hidden&&notice.title==="SuperX can't read this X layout"&&JSON.stringify(reports)===JSON.stringify([scene==='unknown-layout'?'posts':'actions']),{notice,reports});
+      check(scene+': report link is a GitHub issue draft without page content',link.origin==='https://github.com'&&!/status|Writer|Claim/.test(decodeURIComponent(notice.href)),notice.href);
+      await capture(page,'layout-'+scene);await context.close();
+    }
+  }
+
   const cachedPage=await open('feed',{cache:{[ids.root]:cached},settings:{triggerMode:'paused'}});
   check('paused mode restores cache without generation',(await sent(cachedPage.page,'ANALYZE')).length===0&&(await railText(cachedPage.page)).includes('Cached finding'));
   await cachedPage.context.close();
