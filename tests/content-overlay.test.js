@@ -4734,6 +4734,48 @@ test('a partial answer keeps its verdict and gaps while the retry waits',()=>{
   assert.match(card.testShadow.querySelector('.status').textContent,/Fact check incomplete/);
 });
 
+test('a skipped post shows one calm row with the no-claim dot and Check anyway, and never resubmits itself',()=>{
+  const {page,request,card}=verdictFixture(),shadow=card.testShadow,send=message=>{page.port.onMessage.emit({requestId:request.requestId,...message});page.flush();};
+  const box=shadow.querySelector('.card'),row=shadow.querySelector('.skip'),analyses=()=>page.port.sent.filter(message=>message.type==='ANALYZE');
+  assert.equal(box.hasAttribute('data-skipped'),false);
+  send({type:'START'});send({type:'UPDATE',phase:'triage'});
+  assert.equal(shadow.querySelector('.status').textContent,'Checking for claims…');
+  send({type:'TRIAGE_SKIP',triage:{kind:'opinion',local:false},usage:{input_tokens:400,output_tokens:20,total_tokens:420},usageByStage:{triage:{total_tokens:420}}});
+  assert.equal(box.hasAttribute('data-skipped'),true);
+  assert.equal(row.querySelector('.skip-label').textContent,'No checkable claim · Opinion','The row reuses the verdict wording');
+  assert.equal(row.title,'Pre-screened by Claude Haiku 5.5. Nothing was searched, and only the pre-screen was charged.');
+  const button=row.querySelector('.check-anyway');assert.equal(button.textContent,'Check anyway');assert.equal(button.disabled,false);
+  assert.equal(shadow.querySelector('.answer').textContent,'');assert.equal(shadow.querySelector('.retry').hidden,true);
+  const style=shadow.querySelector('style').textContent;
+  assert.match(style,/\.card\[data-skipped\]>:not\(\.skip\)\{display:none!important\}/,'Nothing but the row shows');
+  assert.match(style,/\.skip \.verdict-dot\{[^}]*background:transparent\}/,'The dot is hollow, like the verdict for no claim');
+  page.flush();page.flush();
+  assert.equal(analyses().length,1,'A skipped post is not resubmitted by automatic triggers');
+  button.emit('click');page.flush();
+  assert.equal(analyses().length,2);assert.equal(analyses()[1].triggerKind,'recheck','Check anyway is an explicit check');assert.equal(analyses()[1].force,false);
+  assert.equal(box.hasAttribute('data-skipped'),false);
+});
+
+test('a skipped row names unknown kinds Other, explains a local skip and follows the interface language',()=>{
+  const {page,request,card}=verdictFixture(),row=card.testShadow.querySelector('.skip');
+  page.port.onMessage.emit({type:'TRIAGE_SKIP',requestId:request.requestId,triage:{kind:'<img src=x>',local:true}});page.flush();
+  assert.equal(row.querySelector('.skip-label').textContent,'No checkable claim · Other');
+  assert.equal(row.title,'Too short to contain a checkable claim. Nothing was sent for checking.');
+  page.configure({interfaceLanguage:'zh-CN'});
+  assert.equal(row.querySelector('.skip-label').textContent,'无可核查说法 · 其他');assert.equal(row.querySelector('.check-anyway').textContent,'仍要核查');
+});
+
+test('an Auto route is explained only in the usage tooltip, from known reasons',()=>{
+  for(const [reason,line] of [['hard','Auto chose Sonnet: hard or contested post'],['fallback','Auto chose Haiku: pre-screen unavailable'],['bogus',null]]){
+    const {page,request,card}=verdictFixture();
+    page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'claude',text:'Checked.',sources:[],model:'claude-sonnet-5-5',
+      usage:{input_tokens:900,output_tokens:100,total_tokens:1000},usageByStage:{triage:{total_tokens:420},verify:{total_tokens:1000}},claudeRoute:{model:'claude-sonnet-5-5',reason}}});page.flush();
+    const usage=card.testShadow.querySelector('.token-usage');
+    if(line)assert.ok(usage.title.split('\n').includes(line),reason);else assert.doesNotMatch(usage.title,/Auto chose/,reason);
+    assert.doesNotMatch(card.testShadow.querySelector('.answer').textContent,/Auto chose/);
+  }
+});
+
 test('finished answers label their sources by publisher type without decorating inline links',()=>{
   const {page,request,card}=verdictFixture();const sources=card.testShadow.querySelector('.sources'),answer=card.testShadow.querySelector('.answer');
   page.port.onMessage.emit({type:'RESULT',requestId:request.requestId,result:{provider:'api',text:'The figure matches [the wire report](https://www.reuters.com/world/a "Wire copy").',

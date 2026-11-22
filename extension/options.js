@@ -41,18 +41,22 @@
   const isOAuth = () => $("provider").value === "oauth";
   const isAPI = () => $("provider").value === "api";
   const isClaude = () => $("provider").value === "claude";
-  const claudeControlIds=["claude-api-key","clear-claude-key","claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","reset-claude-spend","claude-auto-trigger"];
+  const claudeControlIds=["claude-api-key","clear-claude-key","claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","reset-claude-spend","claude-auto-trigger","claude-triage"];
   let claudeStatus={configured:false,usd:0,requests:0,budgetUsd:100,cycleStart:0,cycleEnd:0},claudeKeyChanged=false;
   function populateClaudeModels(model){
     const select=$("claude-model");select.replaceChildren();
+    // Auto is opt-in: a pre-screen picks Haiku or Sonnet for each post.
+    const auto=document.createElement("option");auto.value=core.CLAUDE_AUTO;auto.dataset.i18n="claude.modelAuto";auto.textContent=ui.t("claude.modelAuto",uiLanguage);select.append(auto);
     for(const item of core.CLAUDE_MODELS){const option=document.createElement("option");option.value=item.value;option.textContent=item.label;select.append(option);}
-    select.value=core.claudeModelProfile(model)?model:core.DEFAULT_SETTINGS.claudeModel;
+    select.value=model===core.CLAUDE_AUTO||core.claudeModelProfile(model)?model:core.DEFAULT_SETTINGS.claudeModel;
   }
   function formatCycleDate(value){try{return new Date(value).toLocaleDateString(uiLanguage==="auto"?undefined:uiLanguage,{month:"short",day:"numeric"});}catch{return new Date(value).toISOString().slice(5,10);}}
   function renderClaude(){
     $("claude-key-state").textContent=ui.t(claudeStatus.configured?"claude.keyReady":"claude.keyMissing",uiLanguage);
     $("claude-key-state").dataset.state=claudeStatus.configured?"ready":"missing";
     $("clear-claude-key").hidden=!claudeStatus.configured;
+    const help=$("claude-model-help");help.dataset.i18n=$("claude-model").value===core.CLAUDE_AUTO?"claude.modelAutoHelp":"claude.modelHelp";help.textContent=ui.t(help.dataset.i18n,uiLanguage);
+    $("claude-triage-field").hidden=!$("claude-auto-trigger").checked;
     const vars={usd:(claudeStatus.usd||0).toFixed(2),budget:claudeStatus.budgetUsd,requests:claudeStatus.requests||0,start:formatCycleDate(claudeStatus.cycleStart),end:formatCycleDate(claudeStatus.cycleEnd)};
     $("claude-spend").textContent=claudeStatus.cycleEnd?ui.t(claudeStatus.budgetUsd>0?"claude.spend":"claude.spendNoLimit",uiLanguage,vars):"";
     $("claude-spend").dataset.state=claudeStatus.exhausted?"missing":"ready";
@@ -309,6 +313,7 @@
       || Number($("claude-budget").value) !== currentSettings.claudeBudgetUsd
       || Number($("claude-cycle-day").value) !== currentSettings.claudeCycleDay
       || $("claude-auto-trigger").checked !== currentSettings.claudeAutoTrigger
+      || $("claude-triage").checked !== currentSettings.claudeTriage
       || buildSecretChanged || Number($("build-port").value) !== currentSettings.buildPort
       || $("build-model").value !== currentSettings.buildModel
       || $("build-reasoning-effort").value !== currentSettings.buildReasoningEffort
@@ -533,7 +538,7 @@
     populateBuildModels(settings.buildModel);populateBuildReasoning(settings.buildModel,settings.buildReasoningEffort);
     populateClaudeModels(settings.claudeModel);$("claude-effort").value=settings.claudeEffort;
     $("claude-max-searches").value=settings.claudeMaxSearches;$("claude-budget").value=settings.claudeBudgetUsd;
-    $("claude-cycle-day").value=settings.claudeCycleDay;$("claude-auto-trigger").checked=settings.claudeAutoTrigger;
+    $("claude-cycle-day").value=settings.claudeCycleDay;$("claude-auto-trigger").checked=settings.claudeAutoTrigger;$("claude-triage").checked=settings.claudeTriage;
     populateOAuthModels(settings.oauthModel||"grok-4.3",settings.oauthReasoningEffort||"none");$("oauth-remember").checked=oauthLoaded?oauthStatus.remember:settings.oauthRemember!==false;
     $("explanation-mode").value = settings.explanationMode === "custom" ? "custom" : "preset";
     populateModels(settings.apiModel);
@@ -733,6 +738,7 @@
       claudeBudgetUsd:Number($("claude-budget").value),
       claudeCycleDay:Number($("claude-cycle-day").value),
       claudeAutoTrigger:$("claude-auto-trigger").checked,
+      claudeTriage:$("claude-triage").checked,
       explanationMode:$("explanation-mode").value,
       apiModel:enabled?$("api-model").value.trim()||currentSettings.apiModel:currentSettings.apiModel,
       apiReasoningEffort:enabled?$("api-reasoning-effort").value||currentSettings.apiReasoningEffort:currentSettings.apiReasoningEffort,
@@ -825,7 +831,8 @@
     finally { setBusy(false); }
   });
   $("claude-api-key").addEventListener("input",()=>{claudeKeyChanged=Boolean($("claude-api-key").value.trim());clearFieldError("claude-api-key");markDraft();});
-  for(const id of ["claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","claude-auto-trigger"])$(id).addEventListener(id==="claude-auto-trigger"||id.endsWith("model")||id.endsWith("effort")?"change":"input",()=>markDraft());
+  for(const id of ["claude-model","claude-effort","claude-max-searches","claude-budget","claude-cycle-day","claude-auto-trigger","claude-triage"])$(id).addEventListener(["claude-auto-trigger","claude-triage"].includes(id)||id.endsWith("model")||id.endsWith("effort")?"change":"input",()=>markDraft());
+  for(const id of ["claude-model","claude-auto-trigger"])$(id).addEventListener("change",()=>renderClaude());
   $("clear-claude-key").addEventListener("click",async()=>{
     if(busy||!isClaude())return;setBusy(true);
     try{claudeStatus=await send({type:"CLEAR_CLAUDE_KEY"});$("claude-api-key").value="";claudeKeyChanged=false;setStatus("claude.keyCleared");}

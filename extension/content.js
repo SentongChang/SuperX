@@ -760,7 +760,7 @@
         entry.verificationStarted=Boolean(readerText.trim()&&checkText.trim());
       }
       entry.phase=request.phase=message.phase;
-      const phases={starting:'status.verifying',explain:'status.explaining',verification_queued:'status.verificationQueued',verify:'status.verifying',inline:'status.inline'};
+      const phases={starting:'status.verifying',triage:'status.screening',explain:'status.explaining',verification_queued:'status.verificationQueued',verify:'status.verifying',inline:'status.inline'};
       status(entry,phases[message.phase]||'status.verifying');
       if(suppliedText&&!(entry.keepRetryAnswer&&!readerText.trim())){entry.verdict=message.verdict;renderAnswer(entry,readerText);if(readerText.trim())entry.keepRetryAnswer=false;}
       else if(verifying&&entry.latestText)renderAnswer(entry,entry.latestText);
@@ -769,6 +769,14 @@
     }
     if(message.type==='RESULT') {
       applyAnalysisResult(entry,request,message);
+      finishRequest(message);
+    }
+    if(message.type==='TRIAGE_SKIP') {
+      // A pre-screen found no checkable claim. The card keeps one line and a
+      // way to run the check after all; no answer exists to show.
+      entry.analysisRetry=null;entry.keepRetryAnswer=false;entry.status='skipped';entry.phase='';entry.result=null;entry.cached=false;
+      entry.triage={kind:Core.triageSkipKind(message.triage),local:message.triage?.local===true};
+      setVerificationFailure(entry,null,false);renderAnswer(entry,'',true);renderSources(entry,[]);note(entry,'');
       finishRequest(message);
     }
     if(['ERROR','RETRY_WAIT'].includes(message.type)) {
@@ -798,7 +806,7 @@
       finishRequest(message);
     }
     refreshCard(entry);if(request.task==='analysis')syncSharedPost(request);scheduleLayout();
-    if(['RESULT','ERROR'].includes(message.type))tick();
+    if(['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type))tick();
   }
   // API launch spacing belongs to the shared background scheduler; this page
   // submits all visible work without waiting for earlier answers to finish.
@@ -819,7 +827,7 @@
     note(entry,invalid?'':incomplete?partialResultNote(result):'note.possibleErrors');entry.ui.retry.hidden=false;
     if(isAccountLimit(entry.verificationFailure))note(entry,'note.accountLimit');
   }
-  function finishRequest(message) { if(!['RESULT','ERROR','COMMENT_RESULT','COMMENT_ERROR'].includes(message.type))return;requests.delete(message.requestId);pruneDetachedEntries(); }
+  function finishRequest(message) { if(!['RESULT','ERROR','TRIAGE_SKIP','COMMENT_RESULT','COMMENT_ERROR'].includes(message.type))return;requests.delete(message.requestId);pruneDetachedEntries(); }
   function affectsDisplayedPostBody(target) {
     if(DOM?.bodyNodes&&target?.nodeType) {
       const element=target.nodeType===1?target:target.parentElement;
@@ -1347,7 +1355,16 @@
     entry.ui.retry.disabled=!usableConnection()||!settings.enabled||['queued','running','retry-wait'].includes(entry.status)||wakeActions.has(wakeKey(entry,'analysis'));
     if(!providerReady)entry.ui.retry.hidden=true;
     else if(['done','error'].includes(entry.status))entry.ui.retry.hidden=false;
-    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);renderSources(entry);syncPostControl(entry);
+    refreshComments(entry);refreshRetries(entry);syncLoading(entry);refreshUsage(entry);renderVerdict(entry);renderSources(entry);renderSkip(entry);syncPostControl(entry);
+  }
+  function renderSkip(entry) {
+    const ui=entry.ui,skipped=entry.status==='skipped';
+    ui.box.toggleAttribute('data-skipped',skipped);
+    if(!skipped)return;
+    ui.skipLabel.textContent=t('verdict.none')+' · '+t('triage.kind.'+entry.triage.kind);
+    ui.skip.title=t(entry.triage.local?'triage.detailLocal':'triage.detailModel');
+    ui.checkAnyway.textContent=t('triage.checkAnyway');
+    ui.checkAnyway.disabled=!usableConnection()||!settings.enabled;
   }
   function automaticTrigger(entry) {
     if(entry.triggerSuppressed)return null;
@@ -1424,7 +1441,7 @@
     for(const entry of request.followers||[]){
       if(!nativeEntryCurrent(entry)){entry.card.hidden=true;continue;}
       if(Core.apiPostIdentity(entry.post,settings)!==request.apiIdentity){request.followers.delete(entry);continue;}
-      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed','verdict','gaps'])entry[field]=source[field];
+      for(const field of ['status','phase','result','cached','analysisRetry','keepRetryAnswer','verificationBase','verificationStarted','verificationStart','requestDiagnostics','verificationFailure','errorCode','statusKey','statusVars','noteKey','triggerSuppressed','verdict','gaps','triage'])entry[field]=source[field];
       entry.pending=false;entry.since=0;entry.analysisUsage=source.analysisUsage?{...source.analysisUsage}:null;
       renderAnswer(entry,source.latestText||'',true);renderSources(entry,source.sourceList||[]);note(entry,source.noteKey||'');refreshCard(entry);
     }
@@ -1438,7 +1455,8 @@
     if(collapsed)setCollapsed(false,true);
     const active=activePostRequest(entry);if(active){sharePostRequest(active,entry);completeTriggerGuide(kind);return;}
     if(kind!=='manual'&&entry.status!=='new'){if(entry.status==='done')completeTriggerGuide(kind);scheduleLayout();return;}
-    submit(entry,kind==='manual'&&entry.status!=='new',kind,true);
+    // A skipped post has no answer to replace, so its first click is a check.
+    submit(entry,kind==='manual'&&!['new','skipped'].includes(entry.status),kind,true);
   }
   function hideTriggerGuide() {
     triggerGuide.hidden=true;triggerGuideEntry=null;
@@ -1693,7 +1711,7 @@
     // A newly restored timeline must never see the fallback 32px control before
     // its actual native dimensions. Keep our control out of scroll-anchor selection.
     if(entry.checkHost.parentElement!==location.row||entry.checkHost.nextElementSibling!==location.anchor){entry.hoverProgressState=undefined;location.row.insertBefore(entry.checkHost,location.anchor);}
-    const running=['queued','running','retry-wait'].includes(entry.status),label=t(running?'trigger.checkingPost':entry.status==='new'?'trigger.checkPost':'trigger.recheckPost');
+    const running=['queued','running','retry-wait'].includes(entry.status),label=t(running?'trigger.checkingPost':['new','skipped'].includes(entry.status)?'trigger.checkPost':'trigger.recheckPost');
     entry.checkButton.title=label;entry.checkButton.setAttribute('aria-label',label);entry.checkButton.setAttribute('aria-busy',String(running));
     entry.checkButton.disabled=running||!usableConnection();
     syncPostHoverProgress(entry);
@@ -1834,7 +1852,7 @@
     forgetCacheLookup(entry);
     entry.analysisRetry=null;entry.keepRetryAnswer=false;
     const requestId=crypto.randomUUID();
-    entry.pending=false;entry.since=0;queue.remove(entry.post.id);entry.status='queued';entry.phase='';entry.verificationBase='';entry.verificationStarted=false;entry.verificationStart=undefined;entry.result=null;entry.cached=false;entry.requestDiagnostics=undefined;setVerificationFailure(entry,null,false);status(entry,'status.queued');entry.ui.retry.hidden=true;
+    entry.pending=false;entry.since=0;queue.remove(entry.post.id);entry.status='queued';entry.phase='';entry.verificationBase='';entry.verificationStarted=false;entry.verificationStart=undefined;entry.result=null;entry.cached=false;entry.requestDiagnostics=undefined;setVerificationFailure(entry,null,false);status(entry,'status.queued');entry.ui.retry.hidden=true;renderSkip(entry);
     if(force||!entry.ui.answer.textContent)renderAnswer(entry,'',true);
     renderSources(entry,[]);note(entry,'');entry.ui.diagnostics.hidden=true;entry.ui.diagnosticText.textContent='';
     requests.set(requestId,{...requestSnapshot(entry,requestId),force:force===true,triggerKind});
@@ -1903,12 +1921,12 @@
     if(replace||metadata.usage!==undefined)record.usage=usageFields(metadata.usage);
     if(replace||metadata.usageByStage!==undefined) {
       record.byStage={};
-      for(const stage of ['url','inline','explain','verify','comments'])if(metadata.usageByStage?.[stage]&&typeof metadata.usageByStage[stage]==='object')record.byStage[stage]=usageFields(metadata.usageByStage[stage]);
+      for(const stage of ['url','inline','explain','triage','verify','comments'])if(metadata.usageByStage?.[stage]&&typeof metadata.usageByStage[stage]==='object')record.byStage[stage]=usageFields(metadata.usageByStage[stage]);
     }
     if(replace||metadata.model!==undefined)record.model=safeModel(metadata.model);
     if(replace||metadata.modelByStage!==undefined) {
       record.models=[];
-      for(const stage of ['url','inline','explain','verify','comments']){const model=safeModel(metadata.modelByStage?.[stage]);if(model&&!record.models.includes(model))record.models.push(model);}
+      for(const stage of ['url','inline','explain','triage','verify','comments']){const model=safeModel(metadata.modelByStage?.[stage]);if(model&&!record.models.includes(model))record.models.push(model);}
     }
     if(typeof metadata.usageComplete==='boolean')record.complete=metadata.usageComplete;
     else if(replace)record.complete=undefined;
@@ -1944,6 +1962,8 @@
     const completedMetadata=entry.status==='done'&&['status.searched','status.unverified'].includes(entry.statusKey);
     entry.ui.status.hidden=completedMetadata&&!label.hidden;
     if(completedMetadata)lines.push(t(entry.statusKey));
+    const route=entry.result?.claudeRoute?.reason;
+    if(Core.TRIAGE_ROUTES.includes(route))lines.push(t('route.'+route));
     const text=known&&tokenCount(total)!==null?t(incomplete?'usage.known':'usage.total',{count:countText(total)}):t(pending?'usage.pending':'usage.unavailable');
     if(label.textContent!==text)label.textContent=text;
     if(incomplete&&known)lines.push(t('usage.partial'));
@@ -2000,6 +2020,8 @@
       .verdict-badge{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:700}.verdict-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--v);border:1.5px solid var(--v)}
       .verdict[data-tentative] .verdict-dot,.verdict[data-verdict=unproven] .verdict-dot,.verdict[data-verdict=none] .verdict-dot{background:transparent}
       .verdict-gaps{color:var(--gf-muted,#71767b);font-size:12px;overflow-wrap:anywhere}.verdict-gaps span{cursor:help}
+      .skip{display:none;--v:var(--gf-muted,#71767b);flex-wrap:wrap;align-items:flex-start;gap:4px 10px}.card[data-skipped]>:not(.skip){display:none!important}.card[data-skipped]>.skip{display:flex}
+      .skip .verdict-badge{align-items:flex-start;font-weight:400;color:var(--gf-muted,#71767b)}.skip .verdict-dot{margin-top:6px;background:transparent}.check-anyway{flex:none;margin-inline-start:auto;padding:0;font-size:13px}
       .token-usage{display:block;color:var(--gf-muted,#71767b);font-size:12px;margin-bottom:10px;overflow-wrap:anywhere;cursor:help}.token-usage[hidden]{display:none}.token-usage:focus-visible{outline:2px solid var(--gf-accent,#1d9bf0);outline-offset:2px}
     `;
     const box=node('section','card');box.setAttribute('aria-label',t('aria.result'));
@@ -2019,11 +2041,16 @@
     const retryStatus=node('div','retry-status analysis-retry-status'),commentRetryStatus=node('div','retry-status comment-retry-status');
     for(const label of [retryStatus,commentRetryStatus]){label.hidden=true;label.setAttribute('role','status');label.setAttribute('aria-live','polite');}
     const tokenUsage=node('span','token-usage');tokenUsage.hidden=true;tokenUsage.tabIndex=0;
-    actions.append(retry,generateButton);box.append(tokenUsage,status,verdict,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus);shadow.append(css,box);
+    // A skipped post's only line: the hollow "no checkable claim" dot.
+    const skip=node('div','skip'),skipBadge=node('span','verdict-badge'),skipDot=node('span','verdict-dot'),skipLabel=node('span','skip-label');
+    skipDot.setAttribute('aria-hidden','true');skipBadge.append(skipDot,skipLabel);
+    const checkAnyway=node('button','check-anyway');checkAnyway.addEventListener('click',()=>{if(entry.status==='skipped'&&!checkAnyway.disabled)submit(entry,false,'recheck');});
+    skip.append(skipBadge,checkAnyway);
+    actions.append(retry,generateButton);box.append(tokenUsage,status,verdict,thinking,answer,verificationThinking,sources,note,usageHelp,diagnostics,retryStatus,actions,commentStatus,commentRetryStatus,commentHeading,commentHint,comments,copyStatus,skip);shadow.append(css,box);
     // Card controls belong to the overlay, separate from X's navigation handlers.
     for(const type of ['click','pointerdown','keydown'])card.addEventListener(type,event=>event.stopPropagation());
     card.addEventListener('scroll',scheduleLayout,{passive:true});
-    return {card,ui:{box,status,verdict,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
+    return {card,ui:{box,skip,skipLabel,checkAnyway,status,verdict,thinking,thinkingLabel,verificationThinking,verificationThinkingLabel,answer,explanationAnswer,verificationAnswer,analysisDivider,sources,note,usageHelp,retry,retryStatus,commentRetryStatus,generateComments:generateButton,comments,commentStatus,commentHeading,commentHint,copyStatus,diagnostics,diagnosticLabel,diagnosticText,tokenUsage}};
   }
   function validVerificationBoundary(text,start) {
     return typeof text==='string'&&Number.isSafeInteger(start)&&start>2&&start<=text.length&&text.slice(start-2,start)==='\n\n'&&Boolean(text.slice(0,start-2).trim());

@@ -27,6 +27,10 @@ let oauthGeneration=0,oauthActionGeneration=0,oauthPendingLogins=0,oauthCredenti
 const oauth=SuperXOAuth.create({chrome,fetch:globalThis.fetch?.bind(globalThis),crypto:globalThis.crypto,
   keyStore:KeyStore.create?.({purpose:'oauth-refresh'}),onChange:onOAuthChanged});
 const CACHE_TTL = 24 * 60 * 60 * 1000;
+// Claude pre-screen results for this browser session. A screen does not
+// depend on the answer language or model, and it has its own fixed lifetime.
+let triageCache = {};
+const TRIAGE_TTL = 24 * 60 * 60 * 1000, TRIAGE_CACHE_LIMIT = 500, TRIAGE_TIMEOUT_MS = 10000;
 const ready = initialize();
 
 async function initialize() {
@@ -42,7 +46,7 @@ async function initialize() {
   // analysis or normal extension startup.
   apiDiagnosticsReady=loadAPIDiagnostics();
   const local = await chrome.storage.local.get(['settings','uiLanguage','apiKey','apiKeyEncrypted','apiKeyVault','rememberApiKey','buildConnectionEncrypted','invalidAnswerSource','claudeApiKeyEncrypted','claudeSpend']);
-  const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','securityFault','apiBudgetPause','apiCapacityPause']);
+  const session = await chrome.storage.session.get(['quotas','railStates','uiLanguage','apiKey','cache','claudeTriageCache','securityFault','apiBudgetPause','apiCapacityPause']);
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
@@ -89,7 +93,7 @@ async function initialize() {
   const stored=await chrome.storage.local.get(['apiKey','apiKeyEncrypted','apiKeyVault']);
   hasSavedKey=KeyStore.envelopePresent(stored.apiKeyEncrypted)||validKey(stored.apiKey)||stored.apiKeyVault!==undefined;
   credentialReady=validKey(session.apiKey);
-  cache = pruneCache(session.cache); quotas = session.quotas || {};railStates = session.railStates || {};
+  cache = pruneCache(session.cache); triageCache = pruneTriageCache(session.claudeTriageCache); quotas = session.quotas || {};railStates = session.railStates || {};
   // Delete the old persistent post cache without reading or migrating its data.
   await chrome.storage.local.remove('cache');
   // Browser-session data expires after 24 hours, without a provider call.
@@ -606,6 +610,34 @@ function pruneCache(input,now=Date.now()) {
   return Object.fromEntries(kept);
 }
 function cachedResult(key) { const entry = cache[key]; if (freshCacheEntry(entry,Date.now())) return entry; delete cache[key]; return null; }
+function triageKey(post) { return JSON.stringify(['triage-v1',Core.CLAUDE_TRIAGE_MODEL,Core.canonicalPostUrl(post.url),Core.postFingerprint(post)]); }
+function freshTriage(entry,now) {
+  return entry&&typeof entry==='object'&&Number.isFinite(entry.completedAt)&&entry.completedAt>=0&&entry.completedAt<=now&&now-entry.completedAt<TRIAGE_TTL&&Core.sanitizeTriage(entry.triage)!==null;
+}
+function pruneTriageCache(input,now=Date.now()) {
+  const entries=input&&typeof input==='object'&&!Array.isArray(input)?Object.entries(input):[];
+  return Object.fromEntries(entries.filter(([,value])=>freshTriage(value,now)).sort((a,b)=>b[1].completedAt-a[1].completedAt).slice(0,TRIAGE_CACHE_LIMIT));
+}
+function cachedTriage(post) {
+  const key=triageKey(post),entry=triageCache[key];
+  if(freshTriage(entry,Date.now()))return Core.sanitizeTriage(entry.triage);
+  delete triageCache[key];return null;
+}
+function automaticSkip(post,s,triggerKind) {
+  if(!Core.automaticTrigger(triggerKind))return null;
+  const local=Core.triagePrefilter(post);
+  if(local||Core.triageApplies(s,triggerKind)!=='skip')return local;
+  const screened=cachedTriage(post);
+  return screened?.checkable==='no'?screened:null;
+}
+// The page learns only which label to show, never the screen's other codes.
+function triageView(triage) { return {kind:Core.triageSkipKind(triage),local:triage.local===true}; }
+// Only a complete model screen is kept; local and failed screens are not.
+function rememberTriage(post,triage) {
+  triageCache=pruneTriageCache({...triageCache,[triageKey(post)]:{triage,completedAt:Date.now()}});
+  cacheWrites=cacheWrites.catch(()=>{}).then(()=>chrome.storage.session.set({claudeTriageCache:{...triageCache}}));
+  void cacheWrites.catch(()=>{});
+}
 function persistQuotas() {
   // Concurrent reservations and resets must not leave an older storage snapshot
   // behind a newer one. Read the latest counters when this write starts.
@@ -617,9 +649,9 @@ function persistCache(epoch) {
   return cacheWrites;
 }
 function clearStoredCache() {
-  cache={};cacheEpoch++;
+  cache={};triageCache={};cacheEpoch++;
   cacheWrites=cacheWrites.catch(()=>{}).then(async()=>{
-    const results=await Promise.allSettled([chrome.storage.session.remove('cache'),chrome.storage.local.remove('cache')]);
+    const results=await Promise.allSettled([chrome.storage.session.remove(['cache','claudeTriageCache']),chrome.storage.local.remove('cache')]);
     const failed=results.find(value=>value.status==='rejected');
     if(failed)throw failed.reason;
   });
@@ -757,6 +789,10 @@ chrome.runtime.onConnect.addListener(port => {
       const ticket=draft?null:historyTicket(post,snapshot),historyLanguage=draft?'':Core.resolvePostLanguage(snapshot.language,post);
       const cached=draft||message.force ? null : cachedResult(fingerprint);
       if(cached) { rememberHistoryResult(ticket,cached,comments,historyLanguage);send(port,comments?{type:'COMMENT_RESULT',requestId,comments:cached.comments,cached:true,...billingMetadata(cached,snapshot.provider)}:{type:'RESULT',requestId,result:withBillingMetadata(cached,snapshot.provider,snapshot.apiVerification),cached:true}); return; }
+      // A free screen, or a saved Claude screen, stops an automatic check of a
+      // post without a checkable claim before it costs anything.
+      const skip=!comments&&!draft&&automaticSkip(post,snapshot,triggerKind);
+      if(skip){send(port,{type:'TRIAGE_SKIP',requestId,triage:triageView(skip)});return;}
       const config=await publicConfig();
       if(!clients.has(client)||client.cancelEpoch!==receivedEpoch||receivedRevision!==revision||client.requestCancellations.get(requestId)!==receivedCancellation||!currentCredentials())return;
       if(!comments&&!draft){
@@ -840,8 +876,9 @@ function aggregateBilling(job,current={}){
   const usage=GrokFirstAPI.mergeUsage(...values.map(value=>value.usage));
   const model=[...values].reverse().find(value=>value.model)?.model;
   const usageByStage={};
-  for(const name of ['url','explain','verify','inline','comments']){
-    const reported=values.map(value=>value.usageByStage?.[name]||(name===stage?value.usage:undefined)).filter(Boolean);
+  for(const name of ['url','explain','triage','verify','inline','comments']){
+    // A pre-screen reports only its own stage; never count it as the check.
+    const reported=values.map(value=>value.usageByStage?.[name]||(!value.usageByStage&&name===stage?value.usage:undefined)).filter(Boolean);
     if(reported.length)usageByStage[name]=GrokFirstAPI.mergeUsage(...reported);
   }
   const modelByStage=Object.assign({},...values.map(value=>value.modelByStage||{}),model?{[stage]:model}:{});
@@ -937,6 +974,11 @@ async function executeJob(job) {
     if(!liveJob(job))return;
     job.billing={...job.billing,...billingMetadata(result,job.settings.provider)};
     if(result.requestDiagnostics)job.requestDiagnostics=result.requestDiagnostics;
+    // A skipped post leaves no answer, cache entry or history record.
+    if(result.triageSkip){
+      releaseAPISlot(job);pump();
+      send(client.port,{type:'TRIAGE_SKIP',requestId,triage:triageView(result.triageSkip),...aggregateBilling(job,job.billing)});return;
+    }
 
     if(['api','oauth','claude'].includes(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
     if(commentsJob(job))result.comments=GrokFirstAPI.validateComments(result.comments);
@@ -1038,9 +1080,17 @@ async function runAPI(job,onUpdate) {
     const key=claudeKey;
     if(!SuperXClaude.validKey(key))throw Object.assign(new Error('请打开设置并输入 Claude API Key。'),{code:'NEEDS_KEY'});
     if(claudeSpendSummary().exhausted)throw Object.assign(new Error('已达到本周期的 Claude 花费上限。'),{code:'CLAUDE_BUDGET'});
+    let runSettings=job.settings,route;
+    const mode=postJob(job)?Core.triageApplies(job.settings,job.triggerKind):null;
+    if(mode){
+      // Retries reuse the first plan, so a post is screened and paid for once.
+      const plan=job.triagePlan||=await planClaude(job,mode,key,onUpdate);
+      if(plan.skip)return {triageSkip:plan.skip};
+      if(job.settings.claudeModel===Core.CLAUDE_AUTO){route=plan.route;runSettings={...job.settings,claudeRoute:route.model};}
+    }
     // Every finished or failed attempt adds the cost it reported, once.
-    const call=commentsJob(job)?GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal}):GrokFirstAPI.run(job.post,job.settings,key,{signal,onUpdate});
-    return call.then(value=>{recordClaudeSpend(value?.usage);return value;},error=>{recordClaudeSpend(error?.usage||error?.partialResult?.usage);throw error;});
+    const call=commentsJob(job)?GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal}):GrokFirstAPI.run(job.post,runSettings,key,{signal,onUpdate});
+    return call.then(value=>{recordClaudeSpend(value?.usage);return route?{...value,claudeRoute:route}:value;},error=>{recordClaudeSpend(error?.usage||error?.partialResult?.usage);throw error;});
   }
   if(job.settings.provider!=='api')throw Object.assign(new Error('Unknown answer source.'),{code:'PROVIDER_UNAVAILABLE'});
   const session=await waitForAbort(chrome.storage.session.get('apiKey'),signal);
@@ -1049,6 +1099,38 @@ async function runAPI(job,onUpdate) {
   if(!validKey(key))throw Object.assign(new Error('请打开设置并输入 API Key。'),{code:'NEEDS_KEY'});
   if(commentsJob(job))return GrokFirstAPI.generateComments(job.post,job.settings,key,{analysis:job.analysis,signal});
   return GrokFirstAPI.run(job.post,job.settings,key,{signal:job.controller.signal,onUpdate});
+}
+// Screening failures the check itself would hit too pass through to the
+// normal error and retry paths. Any other failure fails open: no skip, Haiku.
+const TRIAGE_PASS_THROUGH_CODES=new Set(['NEEDS_KEY','CLAUDE_BUDGET','RATE_LIMIT','API_CAPACITY']);
+async function planClaude(job,mode,key,onUpdate) {
+  const screen=Core.triagePrefilter(job.post)||cachedTriage(job.post)||await screenPost(job,key,onUpdate);
+  if(mode==='skip'&&screen.checkable==='no')return {skip:screen};
+  return {route:Core.triageRoute(screen)};
+}
+async function screenPost(job,key,onUpdate) {
+  onUpdate({phase:'triage'});
+  const signal=job.controller.signal,child=new AbortController(),abort=()=>child.abort();
+  signal.addEventListener('abort',abort,{once:true});
+  const timer=setTimeout(abort,TRIAGE_TIMEOUT_MS);
+  // The screen joins the card's usage as its own stage. An error that passes
+  // through carries its usage to the job's error path instead.
+  const bill=value=>{
+    if(Object.keys(value?.usage||{}).length)job.completedBilling.push(billingMetadata({usage:value.usage,usageComplete:value.usageComplete,model:value.model,usageByStage:{triage:value.usage},modelByStage:{triage:value.model}},'claude'));
+  };
+  try {
+    const value=await GrokFirstAPI.triage(job.post,job.settings,key,{signal:child.signal});
+    recordClaudeSpend(value.usage);bill(value);rememberTriage(job.post,value.triage);
+    return value.triage;
+  } catch(error) {
+    recordClaudeSpend(error?.usage);
+    const status=error?.requestDiagnostics?.transportStatus;
+    if(signal.aborted||TRIAGE_PASS_THROUGH_CODES.has(error?.code)||status===401||status===403)throw error;
+    bill(error);
+    return {failed:true};
+  } finally {
+    clearTimeout(timer);signal.removeEventListener('abort',abort);
+  }
 }
 function invalidateSecurityJobs() {
   revision++;

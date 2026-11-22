@@ -16,12 +16,12 @@ const SETTINGS_KEYS=['provider','enabled','triggerMode','customTriggers','analys
   'apiModel','apiReasoningEffort',
   'oauthModel','oauthReasoningEffort','oauthRemember',
   'buildDefaultsVersion','buildTransport','buildPort','buildModel','buildReasoningEffort',
-  'claudeModel','claudeEffort','claudeMaxSearches','claudeBudgetUsd','claudeCycleDay','claudeAutoTrigger',
+  'claudeModel','claudeEffort','claudeMaxSearches','claudeBudgetUsd','claudeCycleDay','claudeAutoTrigger','claudeTriage',
   'apiConcurrency','apiVerification','webSearch','xSearch','explanationMode','verifyPrompt','postDraftPrompt','replyDraftPrompt','draftPrompt','commentsPrompt'];
 const PROVIDER_FIELDS={apiModel:'grok-4.3',apiReasoningEffort:'none',
   oauthModel:'grok-4.3',oauthReasoningEffort:'none',oauthRemember:true,
   buildDefaultsVersion:1,buildTransport:'acp',buildPort:2419,buildModel:'grok-4.3',buildReasoningEffort:'none',
-  claudeModel:'claude-haiku-5-5',claudeEffort:'medium',claudeMaxSearches:3,claudeBudgetUsd:100,claudeCycleDay:15,claudeAutoTrigger:false,
+  claudeModel:'claude-haiku-5-5',claudeEffort:'medium',claudeMaxSearches:3,claudeBudgetUsd:100,claudeCycleDay:15,claudeAutoTrigger:false,claudeTriage:true,
   apiConcurrency:3};
 const providerFields=settings=>Object.fromEntries(Object.keys(PROVIDER_FIELDS).map(key=>[key,settings[key]]));
 

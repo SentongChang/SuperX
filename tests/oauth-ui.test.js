@@ -185,3 +185,19 @@ test('Settings waits for worker source migration before reading missing or empty
  }
  const fresh=fixture({omitSettings:true,focus:'oauth',override:message=>message.type==='GET_UI_LANGUAGE'?new Promise(resolve=>setImmediate(()=>resolve({ok:true,language:'en'}))):null});await settle();assert.equal(fresh.ids.get('provider').value,'oauth');assert.equal(fresh.ids.get('oauth-model').value,'grok-4.3');assert.equal(fresh.ids.get('oauth-reasoning-effort').value,'none');assert.equal(fresh.ids.get('oauth-login').focused,true);assert.equal(fresh.messages.some(message=>['OAUTH_LOGIN','ANALYZE','GENERATE_COMMENTS'].includes(message.type)),false);await fresh.submit();assert.equal(fresh.messages.findLast(message=>message.type==='SAVE_SETTINGS')?.settings.provider,'oauth');
 });
+
+test('Claude Settings offers Auto first, keeps Haiku as the default and nests the pre-screen under automatic checks',async()=>{
+ const f=fixture({provider:'claude',override:message=>message.type==='GET_CLAUDE_STATUS'?{ok:true,configured:true,usd:0,requests:0,budgetUsd:100,cycleStart:1,cycleEnd:2}:undefined});await settle();
+ const model=f.ids.get('claude-model'),help=f.ids.get('claude-model-help'),field=f.ids.get('claude-triage-field'),autoTrigger=f.ids.get('claude-auto-trigger'),triage=f.ids.get('claude-triage');
+ assert.deepEqual(model.children.map(option=>option.value),['auto',...Core.CLAUDE_MODELS.map(item=>item.value)]);
+ assert.equal(model.children[0].textContent,UI.t('claude.modelAuto','en'));assert.equal(model.value,'claude-haiku-5-5');
+ assert.equal(help.textContent,UI.t('claude.modelHelp','en'));assert.equal(field.hidden,true);assert.equal(triage.checked,true);
+ const sent=f.messages.length;
+ model.value='auto';model.listeners.change();assert.equal(help.textContent,UI.t('claude.modelAutoHelp','en'));
+ autoTrigger.checked=true;autoTrigger.listeners.change();assert.equal(field.hidden,false,'The pre-screen shows once automatic checks are allowed');
+ triage.checked=false;triage.listeners.change();
+ assert.equal(f.messages.length,sent,'Changing the form sends nothing until it is saved');
+ await f.submit();
+ assert.equal(f.local.settings.claudeModel,'auto');assert.equal(f.local.settings.claudeAutoTrigger,true);assert.equal(f.local.settings.claudeTriage,false);
+ autoTrigger.checked=false;autoTrigger.listeners.change();assert.equal(field.hidden,true);
+});

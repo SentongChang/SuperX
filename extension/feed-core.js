@@ -39,6 +39,10 @@
     {value:'claude-sonnet-5-5',label:'Claude Sonnet 5.5',input:2,output:10,cacheRead:0.10,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true},
     {value:'claude-opus-5-5',label:'Claude Opus 5.5',input:4,output:20,cacheRead:0.20,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true}
   ].map(Object.freeze));
+  // Auto is not a model: a cheap Haiku pre-screen routes each post check to
+  // Haiku, or to Sonnet when the post looks hard. Haiku also screens.
+  const CLAUDE_AUTO = 'auto';
+  const CLAUDE_BASE_MODEL = 'claude-haiku-5-5', CLAUDE_HARD_MODEL = 'claude-sonnet-5-5', CLAUDE_TRIAGE_MODEL = CLAUDE_BASE_MODEL;
   const CLAUDE_EFFORTS = Object.freeze(['low','medium','high']);
   const CLAUDE_WEB_SEARCH_USD = 0.01;
   function claudeModelProfile(model) { return CLAUDE_MODELS.find(profile=>profile.value===model)||null; }
@@ -82,7 +86,9 @@
     return ['auto','none','minimal','low','medium','high','xhigh'].includes(value)?value:'none';
   }
   function providerModel(settings) {
-    if(settings?.provider==='claude')return claudeModelProfile(settings.claudeModel)?settings.claudeModel:'claude-haiku-5-5';
+    // `claudeRoute` is a job-only field the worker sets after the pre-screen.
+    if(settings?.provider==='claude')return settings.claudeModel===CLAUDE_AUTO?(claudeModelProfile(settings.claudeRoute)?settings.claudeRoute:CLAUDE_BASE_MODEL):
+      claudeModelProfile(settings.claudeModel)?settings.claudeModel:CLAUDE_BASE_MODEL;
     return settings?.provider==='oauth'?settings.oauthModel||'grok-4.3':settings?.provider==='build'?settings.buildModel||'grok-4.3':settings?.apiModel||'grok-4.3';
   }
   function providerEffort(settings) {
@@ -383,6 +389,55 @@
     const currentId=current.match(/\/status\/(\d+)$/)?.[1],targetId=target.match(/\/status\/(\d+)$/)?.[1];
     return kind==='detail-main'?triggers.detailMain&&currentId===targetId:triggers.detailReplies&&currentId!==targetId;
   }
+  // Pre-screening only ever stops a check nobody explicitly asked for: these
+  // trigger kinds start on their own (dwell, hover or a detail page).
+  const AUTOMATIC_TRIGGERS = Object.freeze(['automatic','post-hover','button-hover','detail-main','detail-reply']);
+  function automaticTrigger(kind) { return AUTOMATIC_TRIGGERS.includes(kind); }
+  // The free local pre-screen, for every connection: a post this short with
+  // nothing attached carries no claim worth a paid or quota-limited check.
+  // Han, kana and Hangul characters each carry about a word, so count three.
+  const PRESCREEN_MIN_WEIGHT = 8;
+  function triagePrefilter(post) {
+    if (!post || post.images?.length || post.hasMedia === true || post.hasVideo === true || post.quotedContext?.length ||
+        post.textTruncated === true || post.links?.length || post.communityNote) return null;
+    const prose = String(post.text || '').replace(/https?:\/\/\S+|[@#][\p{L}\p{N}_]+/gu, '');
+    let weight = 0;
+    for (const [char] of prose.matchAll(/[\p{L}\p{N}]/gu)) weight += /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(char) ? 3 : 1;
+    return weight < PRESCREEN_MIN_WEIGHT ? {checkable:'no', kind:'short', local:true} : null;
+  }
+  // The paid Claude pre-screen. 'skip' may stop an automatic check that has no
+  // checkable claim; 'route' only picks Auto's model. Drafts and comments are
+  // never screened. Until the provider registry lands, this is the one place
+  // that knows only Claude offers a cheap priced screener.
+  function triageApplies(settings, kind) {
+    if (settings?.provider !== 'claude' || settings.task) return null;
+    if (settings.claudeAutoTrigger === true && settings.claudeTriage !== false && automaticTrigger(kind)) return 'skip';
+    return settings.claudeModel === CLAUDE_AUTO ? 'route' : null;
+  }
+  // The screener answers in codes only, so no model prose reaches the page.
+  const TRIAGE_CHECKABLE = Object.freeze(['yes','no','unclear']);
+  const TRIAGE_KINDS = Object.freeze(['factual','opinion','personal','joke','promo','question','other']);
+  const TRIAGE_DIFFICULTY = Object.freeze(['simple','hard']);
+  const TRIAGE_SIGNALS = Object.freeze(['contested','high_stakes','recent_news','statistics','media_claim','multiple_claims']);
+  // What a skipped post's row may name; anything else reads as "Other".
+  const TRIAGE_SKIP_KINDS = Object.freeze(['opinion','personal','joke','promo','question','short','other']);
+  const TRIAGE_ROUTES = Object.freeze(['hard','simple','fallback','short']);
+  function sanitizeTriage(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length !== 4 ||
+        !TRIAGE_CHECKABLE.includes(raw.checkable) || !TRIAGE_KINDS.includes(raw.kind) || !TRIAGE_DIFFICULTY.includes(raw.difficulty) ||
+        !Array.isArray(raw.signals) || raw.signals.some(signal => !TRIAGE_SIGNALS.includes(signal))) return null;
+    return {checkable:raw.checkable, kind:raw.kind, difficulty:raw.difficulty, signals:TRIAGE_SIGNALS.filter(signal => raw.signals.includes(signal))};
+  }
+  function triageSkipKind(triage) { return TRIAGE_SKIP_KINDS.includes(triage?.kind) ? triage.kind : 'other'; }
+  // Auto sends a post to Sonnet only when the screen calls it hard. A failed
+  // screen never costs more than the cheapest check.
+  function triageRoute(triage) {
+    if (triage?.local) return {model:CLAUDE_BASE_MODEL, reason:'short'};
+    if (!triage || triage.failed) return {model:CLAUDE_BASE_MODEL, reason:'fallback'};
+    const hard = triage.checkable !== 'no' && (triage.checkable === 'unclear' || triage.difficulty === 'hard' ||
+      triage.signals.some(signal => signal === 'contested' || signal === 'high_stakes'));
+    return hard ? {model:CLAUDE_HARD_MODEL, reason:'hard'} : {model:CLAUDE_BASE_MODEL, reason:'simple'};
+  }
   const DEFAULT_SETTINGS = Object.freeze({
     provider: 'oauth',
     enabled: true,
@@ -410,6 +465,7 @@
     claudeBudgetUsd: 100,
     claudeCycleDay: 15,
     claudeAutoTrigger: false,
+    claudeTriage: true,
     apiConcurrency: 3,
     apiVerification: 'only',
     webSearch: true,
@@ -525,12 +581,13 @@
       buildPort: boundedNumber(value.buildPort, DEFAULT_SETTINGS.buildPort, 1024, 65535),
       buildModel: normalizedBuildModel,
       buildReasoningEffort: buildReasoningEffort(normalizedBuildModel,migrateBuildDefaults?DEFAULT_SETTINGS.buildReasoningEffort:value.buildReasoningEffort),
-      claudeModel: claudeModelProfile(value.claudeModel) ? value.claudeModel : DEFAULT_SETTINGS.claudeModel,
+      claudeModel: value.claudeModel === CLAUDE_AUTO || claudeModelProfile(value.claudeModel) ? value.claudeModel : DEFAULT_SETTINGS.claudeModel,
       claudeEffort: claudeEffort(value.claudeEffort),
       claudeMaxSearches: boundedNumber(value.claudeMaxSearches, DEFAULT_SETTINGS.claudeMaxSearches, 1, 10),
       claudeBudgetUsd: boundedNumber(value.claudeBudgetUsd, DEFAULT_SETTINGS.claudeBudgetUsd, 0, 100000),
       claudeCycleDay: boundedNumber(value.claudeCycleDay, DEFAULT_SETTINGS.claudeCycleDay, 1, 28),
       claudeAutoTrigger: value.claudeAutoTrigger === true,
+      claudeTriage: value.claudeTriage !== false,
       apiConcurrency: !currentDefaults&&concurrency===4?DEFAULT_SETTINGS.apiConcurrency:concurrency,
       // Legacy explanation/combined/off choices all become one fact-check task.
       apiVerification: 'only',
@@ -1040,5 +1097,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });

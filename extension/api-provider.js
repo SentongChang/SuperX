@@ -461,7 +461,7 @@
     const model=sanitizedModel(value.model);if(model)metadata.model=model;
     for(const [field,sanitize] of [['usageByStage',sanitizedUsage],['modelByStage',sanitizedModel]]) {
       const byStage={};
-      for(const stage of ['url','explain','verify','inline','comments']) {
+      for(const stage of ['url','explain','triage','verify','inline','comments']) {
         if(!Object.hasOwn(value[field]||{},stage))continue;
         const entry=sanitize(value[field][stage]);
         if(field==='usageByStage'||entry)byStage[stage]=entry;
@@ -913,8 +913,8 @@
     if(!Claude)throw apiError('Claude 连接模块不可用，请重新加载扩展。','API_ERROR');
     if(!apiKey)throw apiError('请在设置中填写 Claude API Key。','NEEDS_KEY');
     const secrets=[apiKey],containsSecret=value=>typeof value==='string'&&value.includes(apiKey);
-    const request=buildRequest(post,settings,stage,analysis),redaction=diagnosticRedaction(post,settings,analysis,secrets,request);
-    const body=Claude.messagesRequest(request,settings,{stage,fetchable:Core.fetchableLinks(post).length});
+    const triage=stage==='triage',request=triage?{}:buildRequest(post,settings,stage,analysis),redaction=diagnosticRedaction(post,settings,analysis,secrets,request);
+    const body=triage?Claude.triageRequest(post):Claude.messagesRequest(request,settings,{stage,fetchable:Core.fetchableLinks(post).length});
     const stream=Claude.createStream();
     const startedAt=Date.now(),diagnostic={failureOrigin:'network',startedAt,requestedModel:diagnosticModel(body.model),requestedEffort:body.output_config.effort};
     let text='',usage={},model=body.model,usageCompleteFlag=false;
@@ -944,9 +944,9 @@
             diagnostic.failureOrigin='stream';Object.assign(diagnostic,errorRequestMetadata(event,redaction));
             throw claudeStreamError(event,diagnostic.providerMessage);
           }
-          if(['content_block_start','content_block_delta'].includes(event.type)&&stage!=='comments') {
+          if(['content_block_start','content_block_delta'].includes(event.type)&&stage==='verify') {
             const next=stream.text();
-            if(next!==text){text=next;if(stage==='verify')assertMatchingScript(text,settings.language,true,'verify');publish();}
+            if(next!==text){text=next;assertMatchingScript(text,settings.language,true,'verify');publish();}
           }
           if(event.type==='message_delta')publish();
           return event.type==='message_stop';
@@ -987,6 +987,18 @@
       }
       throw error;
     }
+  }
+  // The Claude pre-screen for one post. It never streams prose to the page
+  // and returns only sanitized codes plus the usage it cost.
+  async function triage(post,settings,apiKey,{signal,fetchImpl=fetch}={}) {
+    assertNotAborted(signal);
+    const result=await runClaudeStage(post,settings,apiKey,'triage',undefined,{signal,onUpdate(){},fetchImpl});
+    const value=Claude.parseTriage(result.text);
+    if(!value) {
+      const error=failed(apiError('Claude returned an unreadable pre-screen.','API_INCOMPLETE'),'INCOMPLETE');
+      Object.assign(error,sanitizedMetadata({...result,usageByStage:{triage:result.usage},modelByStage:{triage:result.model}}));throw error;
+    }
+    return {triage:value,usage:result.usage,model:result.model,usageComplete:result.usageComplete};
   }
   async function generateComments(post,settings,apiKey,{analysis,signal,fetchImpl=fetch,authorization}={}) {
     authorizationContext(settings,apiKey,authorization);
@@ -1117,7 +1129,7 @@
       return partial;
     }
   }
-  const api={run,generateComments,buildRequest,buildCommentsRequest,parseComments,validateComments,readEvents,responseText,responseSources,safeUrl,verificationMode,sanitizedUsage,sanitizedModel,sanitizedMetadata,sanitizedVerificationFailure,sanitizedRequestDiagnostics,publicError,usageComplete,mergeUsage,searchedResponse,OUTPUT_LIMITS,languageInstruction,resolveLanguage,assertMatchingScript,labels};
+  const api={run,triage,generateComments,buildRequest,buildCommentsRequest,parseComments,validateComments,readEvents,responseText,responseSources,safeUrl,verificationMode,sanitizedUsage,sanitizedModel,sanitizedMetadata,sanitizedVerificationFailure,sanitizedRequestDiagnostics,publicError,usageComplete,mergeUsage,searchedResponse,OUTPUT_LIMITS,languageInstruction,resolveLanguage,assertMatchingScript,labels};
   root.GrokFirstAPI=api;
   if(typeof module!=='undefined')module.exports=api;
 })(globalThis);

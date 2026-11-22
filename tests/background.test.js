@@ -88,7 +88,7 @@ function createBackground(options = {}) {
     async clear(){claudeStoreState.key=null;}};
   const cacheFixture=Object.hasOwn(options,'cache')?{cache:options.cache}:{};
   const session = storage(options.session === null ? cacheFixture : { apiKey: 'session-secret', ...cacheFixture, ...options.session }, { get: options.sessionGet, set: options.sessionSet, remove: options.sessionRemove });
-  const apiCalls = [], commentCalls = [], buildCalls=[], buildCommentCalls=[], buildStatusCalls=[], runtimeMessages = [], createdTabs = [], removedTabs = [], tabMessages = [], deadlines = [], createdWindows = [], removedWindows = [];
+  const apiCalls = [], triageCalls = [], commentCalls = [], buildCalls=[], buildCommentCalls=[], buildStatusCalls=[], runtimeMessages = [], createdTabs = [], removedTabs = [], tabMessages = [], deadlines = [], createdWindows = [], removedWindows = [];
   const tabs = new Map([[7, { id: 7, url: 'https://x.com/home', active: true, windowId: 1, status: 'complete' }], ...(options.tabs || [])]);
   const windows = new Map([[1, { id: 1, type: 'normal', focused: true }], ...(options.windows || [])]);
   let nextTabId = 50, nextWindowId = 600;
@@ -160,6 +160,9 @@ function createBackground(options = {}) {
     GrokFirstAPI: { mergeUsage:provider.mergeUsage,usageComplete:provider.usageComplete,safeUrl: provider.safeUrl, sanitizedUsage:provider.sanitizedUsage, sanitizedMetadata:provider.sanitizedMetadata, sanitizedVerificationFailure:provider.sanitizedVerificationFailure, publicError:provider.publicError, validateComments:provider.validateComments, async generateComments(post,settings,key,callbacks) {
       const call={post,settings,key,...callbacks};commentCalls.push(call);
       return options.commentRun?options.commentRun(call,harness):{comments:['First view '+post.id+'.','Second view '+post.id+'.','Third view '+post.id+'.'],provider:'api',task:'comments'};
+    }, async triage(post, settings, key, callbacks) {
+      const call = { post, settings, key, ...callbacks }; triageCalls.push(call);
+      return options.triageRun ? options.triageRun(call, harness) : { triage: { checkable: 'yes', kind: 'factual', difficulty: 'simple', signals: [] }, provider: 'claude', model: 'claude-haiku-5-5', usage: { input_tokens: 400, output_tokens: 20, total_tokens: 420, cost_in_usd_ticks: 5e6 }, usageComplete: true };
     }, async run(post, settings, key, callbacks) {
       const call = { post, settings, key, ...callbacks }; apiCalls.push(call);
       return options.apiRun ? options.apiRun(call, harness) : { text: `Explanation ${post.id}`, sources: [], provider: 'api', searched: false };
@@ -172,7 +175,7 @@ function createBackground(options = {}) {
     clearTimeout(timer) { if (timer?.immediate) clearImmediate(timer.immediate); if (timer?.deadline) timer.cancelled = true; }
   });
   const harness = {
-    chrome, permissionState, local, session, alarmCalls,oauthManager,oauthCalls, buildStore,buildState,buildStoreCalls, keyStore:options.keyStore||keyStore, keyStoreState, keyStoreCalls, apiCalls, commentCalls, buildCalls,buildCommentCalls,buildStatusCalls,runtimeMessages, createdTabs, removedTabs, tabMessages, tabs, windows, createdWindows, removedWindows, deadlines,
+    chrome, permissionState, local, session, alarmCalls,oauthManager,oauthCalls, buildStore,buildState,buildStoreCalls, keyStore:options.keyStore||keyStore, keyStoreState, keyStoreCalls, apiCalls, triageCalls, commentCalls, buildCalls,buildCommentCalls,buildStatusCalls,runtimeMessages, createdTabs, removedTabs, tabMessages, tabs, windows, createdWindows, removedWindows, deadlines,
     now() { return now; },
     runtimeCounts() { return clone(vm.runInContext('({jobs:jobs.size,queued:queue.length,running:runningJobs.size})',context)); },
     advance(ms) { now += ms; },
@@ -916,8 +919,8 @@ test('checking native status during a long Build task reuses confirmed status an
 });
 async function analyze(harness, port, requestId, id = 100, extra = {}) {
   port.send({ type: 'ANALYZE', requestId, post: post(id), ...extra });
-  await until(() => port.messages.some(message => message.requestId === requestId && ['RESULT', 'ERROR'].includes(message.type)), requestId);
-  return port.messages.findLast(message => message.requestId === requestId && ['RESULT', 'ERROR'].includes(message.type));
+  await until(() => port.messages.some(message => message.requestId === requestId && ['RESULT', 'ERROR', 'TRIAGE_SKIP'].includes(message.type)), requestId);
+  return port.messages.findLast(message => message.requestId === requestId && ['RESULT', 'ERROR', 'TRIAGE_SKIP'].includes(message.type));
 }
 async function draftComments(harness,port,requestId,id=100,extra={}) {
   port.send({type:'GENERATE_COMMENTS',requestId,post:post(id),...extra});
@@ -4152,6 +4155,132 @@ test('Claude: an encrypted Key is restored after a worker restart',async()=>{
   assert.equal(status.configured,true);
   // Spend from an older cycle does not count against the current one.
   assert.equal(status.usd,0);
+});
+
+// WP3: the free pre-screen for every connection, the paid Claude screen and
+// Auto routing. The worker's GrokFirstAPI.triage is a fixture here; the real
+// request and parser are covered in triage.test.js.
+const SCREEN_USAGE={input_tokens:400,output_tokens:20,total_tokens:420,cost_in_usd_ticks:5e6};
+const screen=(triage,extra={})=>async()=>({triage:{difficulty:'simple',signals:[],...triage},model:'claude-haiku-5-5',usage:SCREEN_USAGE,usageComplete:true,...extra});
+const claudeAnswer=async call=>({text:'Claude finding '+call.post.id,sources:[],provider:'claude',searched:true,verificationStatus:'completed',
+  model:core.providerModel(call.settings),usage:{input_tokens:900,output_tokens:100,total_tokens:1000,cost_in_usd_ticks:3e8},usageComplete:true});
+async function readyBackground(provider,settings={},options={}){
+  const bg=createBackground({oauthState:oauthConnected(),claudeStoreState:{key:'sk-ant-api03-triage-fixture'},apiRun:provider==='claude'?claudeAnswer:undefined,...options,
+    settings:{provider,claudeAutoTrigger:true,...settings},local:provider==='claude'?{claudeApiKeyEncrypted:{fixture:'claude'},...options.local}:undefined});
+  await bg.ready();if(provider==='build')await bg.configureBuild();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready),provider+' ready');
+  return {bg,port};
+}
+async function analyzePost(bg,port,requestId,value,extra={}){
+  port.send({type:'ANALYZE',requestId,post:value,...extra});
+  await until(()=>port.messages.some(message=>message.requestId===requestId&&['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type)),requestId);
+  return port.messages.findLast(message=>message.requestId===requestId&&['RESULT','ERROR','TRIAGE_SKIP'].includes(message.type));
+}
+const sentFor=(port,requestId)=>port.messages.filter(message=>message.requestId===requestId).map(message=>message.type);
+
+test('the free pre-screen skips automatic checks of trivially short posts on every connection, never a click',async()=>{
+  for(const provider of ['api','oauth','build','claude']){
+    const {bg,port}=await readyBackground(provider),calls=()=>provider==='build'?bg.buildCalls:bg.apiCalls;
+    const short={...post(300),text:'lol 😂 https://example.com/x'};
+    const skipped=await analyzePost(bg,port,'short-'+provider,short,{triggerKind:'automatic'});
+    assert.equal(skipped.type,'TRIAGE_SKIP',provider);assert.deepEqual(skipped.triage,{kind:'short',local:true},provider);
+    assert.deepEqual(sentFor(port,'short-'+provider),['TRIAGE_SKIP'],'No job is queued or started');
+    assert.equal(calls().length,0,provider);assert.equal(bg.triageCalls.length,0,provider);
+    assert.equal((await analyzePost(bg,port,'short-click-'+provider,short,{triggerKind:'manual'})).type,'RESULT',provider);
+    assert.equal(calls().length,1,provider);assert.equal(bg.triageCalls.length,0,'A click is never screened');
+    assert.equal(bg.runtimeCounts().jobs,0,provider);
+  }
+});
+
+test('Claude: a paid screen with no claim skips the automatic check and is reused, never cached or recorded as an answer',async()=>{
+  const {bg,port}=await readyBackground('claude',{},{triageRun:screen({checkable:'no',kind:'opinion'})});
+  await visitHistory(bg,port,[100]);
+  const skipped=await analyze(bg,port,'opinion',100,{triggerKind:'automatic'});
+  assert.equal(skipped.type,'TRIAGE_SKIP');assert.deepEqual(skipped.triage,{kind:'opinion',local:false});
+  assert.equal(bg.triageCalls.length,1);assert.equal(bg.triageCalls[0].key,'sk-ant-api03-triage-fixture');assert.equal(bg.apiCalls.length,0);
+  assert.ok(port.messages.some(message=>message.requestId==='opinion'&&message.type==='UPDATE'&&message.phase==='triage'));
+  assert.deepEqual(skipped.usageByStage,{triage:SCREEN_USAGE});assert.equal(skipped.model,'claude-haiku-5-5');
+  let status=await bg.message({type:'GET_CLAUDE_STATUS'});
+  assert.equal(status.requests,1);assert.ok(Math.abs(status.usd-0.0005)<1e-9,'The screen counts against the budget');
+  await until(()=>Object.keys(bg.session.data.claudeTriageCache||{}).length===1,'screen cache write');
+  assert.equal(Object.keys(bg.session.data.cache||{}).length,0);
+  assert.equal(bg.local.data.superxHistory[0].analysis,undefined);
+  const again=await analyze(bg,port,'opinion-again',100,{triggerKind:'automatic'});
+  assert.equal(again.type,'TRIAGE_SKIP');assert.deepEqual(sentFor(port,'opinion-again'),['TRIAGE_SKIP']);assert.equal(bg.triageCalls.length,1);
+  // Check anyway is an explicit check; with a fixed model it is never screened.
+  assert.equal((await analyze(bg,port,'anyway',100,{triggerKind:'recheck'})).type,'RESULT');
+  assert.equal(bg.apiCalls.length,1);assert.equal(bg.triageCalls.length,1);
+  status=await bg.message({type:'GET_CLAUDE_STATUS'});assert.equal(status.requests,2);
+  assert.equal((await bg.message({type:'CLEAR_CACHE'})).ok,true);
+  assert.equal(bg.session.data.claudeTriageCache,undefined);
+  assert.equal((await analyze(bg,port,'after-clear',100,{triggerKind:'automatic'})).type,'TRIAGE_SKIP');assert.equal(bg.triageCalls.length,2);
+});
+
+test('Claude Auto: a hard post is routed to Sonnet and the card bills the screen and the check together',async()=>{
+  const {bg,port}=await readyBackground('claude',{claudeModel:'auto'},{triageRun:screen({checkable:'yes',kind:'factual',difficulty:'hard'})});
+  const result=await analyze(bg,port,'hard',100,{triggerKind:'automatic'});
+  assert.equal(result.type,'RESULT');assert.equal(bg.triageCalls.length,1);assert.equal(bg.apiCalls.length,1);
+  assert.equal(bg.apiCalls[0].settings.claudeRoute,'claude-sonnet-5-5');assert.equal(core.providerModel(bg.apiCalls[0].settings),'claude-sonnet-5-5');
+  assert.deepEqual(result.result.claudeRoute,{model:'claude-sonnet-5-5',reason:'hard'});
+  assert.equal(result.result.usageByStage.triage.total_tokens,420);assert.equal(result.result.usageByStage.verify.total_tokens,1000);
+  assert.equal(result.result.usage.total_tokens,1420);assert.equal(result.result.model,'claude-sonnet-5-5');
+  assert.equal(result.result.modelByStage.triage,'claude-haiku-5-5');
+  assert.equal((await bg.message({type:'GET_CLAUDE_STATUS'})).requests,2);
+  assert.equal(bg.local.data.settings.claudeModel,'auto');assert.equal(Object.hasOwn(bg.local.data.settings,'claudeRoute'),false);
+  // The answer key holds 'auto', so a saved answer is found before any screen.
+  const cached=await analyze(bg,port,'hard-again',100,{triggerKind:'automatic'});
+  assert.equal(cached.cached,true);assert.deepEqual(cached.result.claudeRoute,{model:'claude-sonnet-5-5',reason:'hard'});
+  assert.equal(bg.triageCalls.length,1);assert.equal(bg.apiCalls.length,1);
+});
+
+test('Claude: clicks are screened only under Auto, and only to pick the model',async()=>{
+  const fixed=await readyBackground('claude',{claudeAutoTrigger:false},{triageRun:screen({checkable:'no',kind:'joke'})});
+  assert.equal((await analyze(fixed.bg,fixed.port,'fixed-click',100,{triggerKind:'manual'})).type,'RESULT');
+  assert.equal(fixed.bg.triageCalls.length,0);assert.equal(fixed.bg.apiCalls[0].settings.claudeRoute,undefined);
+  const auto=await readyBackground('claude',{claudeAutoTrigger:false,claudeModel:'auto'},{triageRun:screen({checkable:'no',kind:'joke'})});
+  const clicked=await analyze(auto.bg,auto.port,'auto-click',100,{triggerKind:'manual'});
+  assert.equal(clicked.type,'RESULT','A click is answered even when the screen finds no claim');
+  assert.equal(auto.bg.triageCalls.length,1);assert.deepEqual(clicked.result.claudeRoute,{model:'claude-haiku-5-5',reason:'simple'});
+  const short=await analyzePost(auto.bg,auto.port,'auto-short-click',{...post(101),text:'lol'},{triggerKind:'manual'});
+  assert.deepEqual(short.result.claudeRoute,{model:'claude-haiku-5-5',reason:'short'});assert.equal(auto.bg.triageCalls.length,1,'A local screen costs nothing');
+  const comments=await draftComments(auto.bg,auto.port,'auto-comments',100,{analysis:{text:'Checked.'}});
+  assert.equal(comments.type,'COMMENT_RESULT');assert.equal(auto.bg.triageCalls.length,1,'Comment drafts are never screened');
+});
+
+test('Claude: a failed screen fails open to Haiku, while errors the check would hit too pass through',async()=>{
+  const unreadable=Object.assign(new Error('unreadable'),{code:'API_INCOMPLETE',usage:SCREEN_USAGE,usageComplete:true,model:'claude-haiku-5-5'});
+  const failing=await readyBackground('claude',{claudeModel:'auto'},{triageRun:async()=>{throw unreadable;}});
+  const fallback=await analyze(failing.bg,failing.port,'fallback',100,{triggerKind:'automatic'});
+  assert.equal(fallback.type,'RESULT','A failed screen never skips a post');
+  assert.deepEqual(fallback.result.claudeRoute,{model:'claude-haiku-5-5',reason:'fallback'});
+  assert.equal(fallback.result.usageByStage.triage.total_tokens,420,'A failed screen still shows what it cost');
+  assert.equal((await failing.bg.message({type:'GET_CLAUDE_STATUS'})).requests,2);
+  await tick();assert.equal(failing.bg.session.data.claudeTriageCache,undefined,'Failed screens are not cached');
+  // The harness runs the 10 s screen timer at once; only the screen is aborted.
+  const slow=await readyBackground('claude',{claudeModel:'auto'},{triageRun:call=>new Promise((resolve,reject)=>call.signal.addEventListener('abort',()=>reject(Object.assign(new Error('aborted'),{code:'CANCELED',name:'AbortError'}))))});
+  const timedOut=await analyze(slow.bg,slow.port,'slow',100,{triggerKind:'automatic'});
+  assert.equal(timedOut.type,'RESULT');assert.deepEqual(timedOut.result.claudeRoute,{model:'claude-haiku-5-5',reason:'fallback'});
+  for(const [label,error] of [['rate',Object.assign(new Error('limited'),{code:'RATE_LIMIT'})],['auth',Object.assign(new Error('denied'),{code:'API_ERROR',requestDiagnostics:{failureOrigin:'http',transportStatus:401}})]]){
+    const {bg,port}=await readyBackground('claude',{},{retryLimit:0,triageRun:async()=>{throw error;}});
+    const failed=await analyze(bg,port,'pass-'+label,100,{triggerKind:'automatic'});
+    assert.equal(failed.type,'ERROR',label);assert.equal(failed.code,error.code,label);assert.equal(bg.apiCalls.length,0,label);
+  }
+  const budget=await readyBackground('claude',{},{local:{claudeSpend:{cycleStart:core.claudeCycle(1800000000000,15).start,usd:150,requests:9}}});
+  assert.equal((await analyze(budget.bg,budget.port,'budget',100,{triggerKind:'automatic'})).code,'CLAUDE_BUDGET');
+  assert.equal(budget.bg.triageCalls.length,0,'An exhausted budget sends no screen either');
+});
+
+test('Claude: a retried check reuses its screen instead of paying for another',async()=>{
+  let attempts=0;
+  const {bg,port}=await readyBackground('claude',{claudeModel:'auto'},{triageRun:screen({checkable:'yes',kind:'factual'}),apiRun:async call=>{
+    if(++attempts===1)throw Object.assign(new Error('limited'),{code:'RATE_LIMIT'});
+    return claudeAnswer(call);
+  }});
+  const result=await analyze(bg,port,'retried',100,{triggerKind:'automatic'});
+  assert.equal(result.type,'RESULT');assert.ok(port.messages.some(message=>message.requestId==='retried'&&message.type==='RETRY_WAIT'));
+  assert.equal(bg.apiCalls.length,2);assert.equal(bg.triageCalls.length,1);
+  assert.equal(result.result.usageByStage.triage.total_tokens,420,'The screen is billed once');
+  assert.deepEqual(result.result.claudeRoute,{model:'claude-haiku-5-5',reason:'simple'});
 });
 
 // Golden characterization for the provider registry (WP7-P0). The stored

@@ -203,6 +203,10 @@
             <div class="credential-actions"><button id="reset-claude-spend" class="text-button" type="button" data-i18n="claude.resetSpend">Reset this cycle's counter</button></div>
             <label class="checkbox-label"><input id="claude-auto-trigger" type="checkbox" aria-describedby="claude-auto-trigger-help"><span data-i18n="claude.autoTrigger">Also allow automatic checks</span></label>
             <p id="claude-auto-trigger-help" class="help indented" data-i18n="claude.autoTriggerHelp">Off by default.</p>
+            <div id="claude-triage-field" class="indented nested-option" hidden>
+              <label class="checkbox-label"><input id="claude-triage" type="checkbox" aria-describedby="claude-triage-help"><span data-i18n="claude.triage">Pre-screen automatic checks</span></label>
+              <p id="claude-triage-help" class="help indented" data-i18n="claude.triageHelp">Haiku first decides whether a post makes a factual claim (under $0.001). Posts without one are not checked unless you click Check anyway.</p>
+            </div>
             <p class="help" data-i18n="options.claude.xContext">Claude can't search X. SuperX passes along what's on your screen and lets Claude open the post's own links.</p>
           </div>
           <div id="api-concurrency-field" class="field concurrency-field">
