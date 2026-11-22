@@ -4578,3 +4578,113 @@ test('partial and cached checks retain useful text while naming the account limi
     assertTokenCount(card,9);page.tick(60000);assert.equal(page.port.sent.filter(message=>message.type==='ANALYZE').length,1);
   }
 });
+
+// Golden characterization for the provider registry (WP7-P0). These rail
+// keys, titles, links and focus values were recorded before the registry
+// existed and must stay unchanged through it.
+function goldenProviderPage(provider,{ready=true,...settings}={}){
+  const page=fixture({postCount:1});
+  if(provider==='oauth')oauthFeedConfig(page,{ready,settings});
+  else{page.port.onMessage.emit({type:'CONFIG',settings:{...core.DEFAULT_SETTINGS,provider,dwellMs:0,claudeAutoTrigger:true,...settings},ready,used:0});page.flush();}
+  return page;
+}
+function goldenStatusText(key){
+  if(key==='status.needsKey')return ui.t('status.needsKeyAction','zh-CN',{settings:ui.t('common.settings','zh-CN')});
+  const text=ui.t(key,'zh-CN',{model:core.DEFAULT_SETTINGS.oauthModel});
+  return key.startsWith('oauth.')?text+' '+ui.t('common.settings','zh-CN'):key.startsWith('build.')?text+' '+ui.t('popup.setupBuild','zh-CN'):text;
+}
+
+test('golden: rail error keys for every provider and code family',()=>{
+  const http=(httpStatus,providerCode,code='ACCESS')=>({stage:'verify',code,errorCode:'API_ERROR',httpStatus,providerCode});
+  const rows=[
+    // Claude-owned keys take precedence, and the budget code wins under any provider.
+    ['claude','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['api','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['oauth','CLAUDE_BUDGET',undefined,'claude.budgetReached'],
+    ['claude','API_ERROR',http(401),'claude.keyRejected'],
+    ['claude','API_ERROR',http(undefined,'authentication_error'),'claude.keyRejected'],
+    ['claude','API_ERROR',http(503,undefined,'SERVER'),'claude.serverError'],
+    ['claude','API_ERROR',http(undefined,undefined,'SERVER'),'claude.serverError'],
+    ...[400,402,403,404].map(status=>['claude','API_ERROR',http(status),'claude.requestRejected']),
+    ['claude','API_ERROR',http(undefined,'billing_error'),'claude.requestRejected'],
+    ['claude','API_ERROR',http(429,undefined,'RATE_LIMIT'),'account.limited'],
+    ['claude','API_ERROR',http(undefined,undefined,'CONNECTION'),'error.apiConnection'],
+    ['claude','NEEDS_KEY',undefined,'status.needsKey'],
+    // Shared input and model codes.
+    ['api','MODEL_UNSUPPORTED',undefined,'error.modelUnsupported'],
+    ['oauth','MEDIA_INPUT_LIMIT',undefined,'error.mediaLimit'],
+    ['api','API_IMAGE_INPUT',undefined,'error.apiImageInput'],
+    ['build','BUILD_IMAGE_UNSUPPORTED',undefined,'build.imageUnsupported'],
+    ['build','BUILD_IMAGE_UNAVAILABLE',undefined,'build.imageUnavailable'],
+    ['build','BUILD_IMAGE_LIMIT',undefined,'build.imageLimit'],
+    // Sign-in codes, with a fallback for any other OAUTH_ code.
+    ...Object.entries({OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',
+      OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_CANCELLED:'oauth.canceled',OAUTH_MODEL_UNAVAILABLE:'oauth.modelUnavailable',
+      OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError',OAUTH_SOMETHING_NEW:'oauth.unavailable'})
+      .map(([code,key])=>['oauth',code,undefined,key]),
+    ['api','OAUTH_LOGIN_REQUIRED',undefined,'oauth.needsLogin'],
+    ['api','API_CAPACITY',{stage:'verify',code:'SERVER',errorCode:'API_CAPACITY'},'error.apiCapacity'],
+    // Local Grok Build codes, with a fallback for any other BUILD_ code.
+    ...Object.entries({BUILD_LOGIN_REQUIRED:'build.login',BUILD_CANCEL_UNCONFIRMED:'build.cancelUnconfirmed',BUILD_CONNECTION_REQUIRED:'build.codeRequired',BUILD_AUTH_FAILED:'build.codeInvalid',
+      BUILD_UNAVAILABLE:'build.missing',BUILD_DISCONNECTED:'build.missing',BUILD_NATIVE_MISSING:'build.missing',BUILD_VERSION_UNSUPPORTED:'build.unsupported',
+      BUILD_MODEL_UNSUPPORTED:'build.unsupported',BUILD_EFFORT_UNSUPPORTED:'build.unsupported',BUILD_SOMETHING_NEW:'build.unavailable'})
+      .map(([code,key])=>['build',code,undefined,key]),
+    // Account limits apply before the per-provider API ladder.
+    ...['api','oauth','build','claude'].map(provider=>[provider,'API_ERROR',http(402,'spending_limit'),'account.spending']),
+    ['api','RATE_LIMIT',undefined,'account.limited'],
+    // The API ladder: sign-in keeps its own wording for 401/402/403.
+    ['api','API_ERROR',http(401),'error.apiKeyRejected'],
+    ['build','API_ERROR',http(401),'error.apiKeyRejected'],
+    ['oauth','API_ERROR',http(401),'oauth.reauthRequired'],
+    ['api','API_ERROR',http(402),'error.apiUsage'],
+    ['oauth','API_ERROR',http(402),'oauth.usageError'],
+    ['api','API_ERROR',http(403),'error.apiAccess'],
+    ['oauth','API_ERROR',http(undefined,'forbidden'),'oauth.permissionError'],
+    ['oauth','API_ERROR',http(undefined,undefined,'CONNECTION'),'error.apiConnection'],
+    ['api','API_ERROR',http(502,undefined,'SERVER'),'error.apiServer'],
+    ['oauth','API_ERROR',http(409),'error.apiRequest'],
+    ['api','API_ERROR',http(undefined,undefined,'ACCESS'),'error.apiRequest'],
+    ['api','API_ERROR',http(undefined,undefined,'UNKNOWN'),'error.apiFailed'],
+    // Provider-independent tail codes.
+    ['oauth','API_STREAM_ERROR',undefined,'error.apiConnection'],
+    ['api','TIMEOUT',undefined,'error.apiTimeout'],
+    ['api','API_INCOMPLETE',{stage:'verify',code:'OUTPUT_LIMIT'},'error.apiOutputLimit'],
+    ['api','API_INCOMPLETE',undefined,'error.apiIncomplete'],
+    ['api','KEY_MIGRATION_REQUIRED',undefined,'status.needsKey'],
+    ['build','CANCELLED',undefined,'status.cancelled'],
+    ['api','RAIL_COLLAPSED',undefined,'status.disabled'],
+    ['api','URL_SEARCH_REQUIRED',undefined,'error.urlSearchRequired'],
+    ['oauth','API_LANGUAGE_MISMATCH',undefined,'error.outputLanguageMismatch'],
+    ['claude','SOMETHING_NEW',undefined,'status.failed']
+  ];
+  for(const [provider,code,verificationFailure,key] of rows){
+    const page=goldenProviderPage(provider),request=page.port.sent.find(message=>message.type==='ANALYZE');
+    assert.ok(request,provider+' analysis starts');
+    page.port.onMessage.emit({type:'ERROR',requestId:request.requestId,code,error:'Safe generic error',verificationFailure});page.flush();
+    assert.equal(page.cards()[0].testShadow.querySelector('.status').textContent,goldenStatusText(key),`${provider} ${code} ${JSON.stringify(verificationFailure)} → ${key}`);
+  }
+});
+
+test('golden: rail titles, usage links and Settings focus per provider',async()=>{
+  const expected={
+    api:{header:['tooltip.apiMode',{count:5}],setup:'common.enterKey',focus:'api-key',links:[['account.viewUsage','https://grok.com/dashboard/usage'],['account.viewConsole','https://console.x.ai/']]},
+    oauth:{header:['oauth.modeLabel',{count:5}],setup:'oauth.login',focus:'oauth',links:[['account.viewUsage','https://grok.com/dashboard/usage']]},
+    build:{header:['popup.buildLabel',{transport:'ACP'}],setup:'popup.setupBuild',focus:'build',links:[['account.viewUsage','https://grok.com/dashboard/usage']]},
+    claude:{header:['claude.modeLabel',{count:5}],setup:'common.enterKey',focus:'claude',links:[['claude.billingLink','https://platform.claude.com/settings/billing']]}
+  };
+  const railNode=(page,name)=>page.nodes.find(node=>node.className===name);
+  for(const [provider,{header,setup,focus,links}] of Object.entries(expected)){
+    const blocked=goldenProviderPage(provider,{ready:false,apiConcurrency:5});
+    assert.equal(railNode(blocked,'rail-head').title,ui.t(header[0],'zh-CN',header[1]),provider);
+    assert.equal(railNode(blocked,'rail-settings').title,ui.t(setup,'zh-CN'),provider);
+    railNode(blocked,'rail-settings').emit('click');await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(blocked.runtimeMessages.findLast(message=>message.type==='OPEN_SETTINGS').focus,focus,provider);
+
+    const page=goldenProviderPage(provider,{apiConcurrency:5});
+    assert.equal(railNode(page,'rail-settings').title,ui.t('common.settings','zh-CN'),provider);
+    const request=page.port.sent.find(message=>message.type==='ANALYZE');
+    page.port.onMessage.emit({type:'ERROR',requestId:request.requestId,code:'API_ERROR',verificationFailure:{stage:'verify',code:'ACCESS',errorCode:'API_ERROR',httpStatus:402,providerCode:'spending_limit'}});page.flush();
+    const help=page.cards()[0].testShadow.querySelector('.usage-help');assert.equal(help.hidden,false,provider);
+    assert.deepEqual(help.querySelectorAll('a').map(link=>[link.textContent,link.href]),links.map(([key,url])=>[ui.t(key,'zh-CN'),url]),provider);
+  }
+});

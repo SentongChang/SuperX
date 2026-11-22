@@ -4153,3 +4153,57 @@ test('Claude: an encrypted Key is restored after a worker restart',async()=>{
   // Spend from an older cycle does not count against the current one.
   assert.equal(status.usd,0);
 });
+
+// Golden characterization for the provider registry (WP7-P0). The stored
+// cache key strings and Settings focus below were recorded before the
+// registry existed and must stay byte-identical through it.
+const GOLDEN_PROVIDER_SETTINGS={
+  api:{apiModel:'grok-4.7',apiReasoningEffort:'high'},
+  oauth:{oauthModel:'grok-4.7',oauthReasoningEffort:'low'},
+  build:{buildModel:'grok-4.7',buildReasoningEffort:'high',buildDefaultsVersion:1},
+  claude:{claudeModel:'claude-sonnet-5-5',claudeEffort:'high',claudeMaxSearches:5}
+};
+const GOLDEN_CACHE_IDENTITY={
+  api:['grok-4.7','high'],
+  oauth:[[OAUTH_ACCOUNT_A,'grok-4.7'],'low'],
+  build:[['official-ws-v1',2419,'grok-4.7'],'high'],
+  claude:[['claude-messages-v1','claude-sonnet-5-5',5],'high']
+};
+async function goldenProviderBackground(provider){
+  const bg=createBackground({settings:{provider,language:'ja',...GOLDEN_PROVIDER_SETTINGS[provider]},oauthState:oauthConnected(),
+    claudeStoreState:{key:'sk-ant-api03-golden-fixture'},local:provider==='claude'?{claudeApiKeyEncrypted:{fixture:'claude'}}:undefined});
+  await bg.ready();if(provider==='build')await bg.configureBuild();
+  const port=bg.connect();await until(()=>port.messages.some(value=>value.type==='CONFIG'&&value.ready),provider+' ready');
+  return {bg,port};
+}
+
+test('golden: analysis and comment cache keys per provider are byte-identical stored strings',async()=>{
+  for(const provider of ['api','oauth','build','claude']){
+    const {bg,port}=await goldenProviderBackground(provider),[identity,effort]=GOLDEN_CACHE_IDENTITY[provider];
+    assert.equal((await analyze(bg,port,'golden-analysis-'+provider,100,{triggerKind:'manual'})).type,'RESULT',provider);
+    assert.equal((await draftComments(bg,port,'golden-comments-'+provider,100,{analysis:{text:'Checked.'}})).type,'COMMENT_RESULT',provider);
+    await until(()=>Object.keys(bg.session.data.cache||{}).length===2,provider+' cache write');
+    const analysisKey=JSON.stringify(['GrokFirst-v1',provider,identity,'ja',true,true,'api-v11-context-images','preset','only',
+      JSON.stringify(['post-input-v4-source-full-url',provider,'https://x.com/author/status/100','ja']),
+      'fact-check-prompts-v2-deeper',core.DEFAULT_PROMPTS.verify,effort]);
+    const commentKey=JSON.stringify(['GrokFirst-comments-v2-language',provider,identity,'ja',
+      JSON.stringify([['100','Claim 100','','','',false,[]],[]]),
+      {text:'Checked.',verificationStatus:'',warning:'',sources:[]},'comments-prompt-v1',core.DEFAULT_PROMPTS.comments,effort]);
+    assert.deepEqual(Object.keys(bg.session.data.cache).sort(),[analysisKey,commentKey].sort(),provider);
+  }
+});
+
+test('golden: OPEN_SETTINGS focus precedence for every requested focus and provider',async()=>{
+  const requested=[undefined,'api-key','oauth','build','claude'];
+  const expected={
+    api:['api-key','api-key','oauth','build','claude'],
+    oauth:['oauth','oauth','oauth','oauth','oauth'],
+    build:['build','build','oauth','build','build'],
+    claude:['claude','claude','oauth','build','claude']
+  };
+  for(const [provider,ids] of Object.entries(expected)){
+    const opened=[],bg=createBackground({settings:{provider},openOptionsPage:h=>opened.push(h.session.data.superxOptionsFocus.id)});await bg.ready();
+    for(const focus of requested)assert.equal((await bg.message({type:'OPEN_SETTINGS',focus})).ok,true);
+    assert.deepEqual(opened,ids,provider);
+  }
+});

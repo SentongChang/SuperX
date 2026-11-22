@@ -114,3 +114,25 @@ test('every supported language translates the compact popup summary',()=>{
     const value=UI.t(key,language,{seconds:'1.5'});assert.notEqual(value,key);assert.ok(value.trim());assert.doesNotMatch(value,/\{seconds\}/);
   }
 });
+
+// Golden characterization for the provider registry (WP7-P0): popup label,
+// hint, not-ready reason and Settings focus per provider, recorded before the
+// registry existed.
+test('golden: popup provider label, automatic hint, blocked reason and Settings focus per provider',async()=>{
+  const expected={
+    api:{label:['popup.apiLabel',{count:3}],hint:UI.t('popup.apiHint','en'),blocked:'status.needsKey',focus:'api-key'},
+    oauth:{label:['popup.oauthLabel',{count:3}],hint:UI.t('popup.oauthHint','en'),blocked:'oauth.needsLogin',focus:'oauth'},
+    build:{label:['popup.buildLabel',{transport:'ACP'}],hint:UI.t('popup.buildHint','en'),blocked:'build.missing',focus:'build'},
+    claude:{label:['claude.modeLabel',{count:3}],hint:UI.t('claude.popupHint','en'),blocked:'status.needsKey',focus:'claude'}
+  };
+  for(const [provider,{label,hint,blocked,focus}] of Object.entries(expected)){
+    const offline=popupFixture({provider});await settle();
+    assert.equal(offline.elements.get('enabled-label').textContent,UI.t(blocked,'en'),provider);
+    const p=popupFixture({provider,ready:true});await settle();
+    assert.equal(p.elements.get('provider-label').textContent,UI.t(label[0],'en',label[1]),provider);
+    assert.equal(p.elements.get('provider-hint').hidden,false,provider);
+    assert.equal(p.elements.get('provider-hint').textContent,hint,provider);
+    p.elements.get('options').listeners.click();await settle();
+    assert.equal(p.messages.findLast(message=>message.type==='OPEN_SETTINGS').focus,focus,provider);
+  }
+});
