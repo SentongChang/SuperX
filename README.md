@@ -44,6 +44,8 @@ The [acceptance record](docs/RELEASE_CHECKLIST.md) distinguishes automated check
 
 **New in 1.1.6:** stable timeline position when returning from a post detail, with aligned and evenly spaced SuperX controls on both X layouts, including Subscribe/Follow headers.
 
+New installations open a three-step setup guide (connection, sign-in or Key, when to fact-check) and start in **Only when I click**: nothing is sent until you press the SuperX button on a post. Choose **Automatically** there or later in Settings; reopen the guide from **Setup guide** in the Settings sidebar or the popup. Updating never changes existing trigger choices; an existing installation that was never connected sees the guide once.
+
 The popup and Settings share Automatic / Custom / Pause choices. Custom can combine the post-header SuperX button, button hover, whole-post hover, automatic detail-post checks and automatic reply checks. The button, both one-second hover rules and detail-post checks start enabled; automatic reply checks start disabled. Existing choices are retained. Cached answers appear in every mode without a new model request. Hover starts an unchecked post; click again to explicitly recheck. Switching modes keeps accepted answers running.
 
 In Custom mode, the popup shows a compact summary of the five saved trigger states and hover delays. Change these conditions in Settings; switching modes retains your choices.
@@ -71,7 +73,7 @@ Requirements: desktop Chrome or Chromium-based Edge 120+, and provider access to
 Install version 1.1.5 from the Chrome Web Store for Chrome-managed updates:
 
 1. Open [SuperX in the Chrome Web Store](https://chromewebstore.google.com/detail/superx/clcflilaihhnnglfamdblhopokpnlioo) and choose **Add to Chrome**.
-2. Open **Settings → Connection**. New installations default to **Sign in · The X Subscription**: choose **Sign in to Grok** and approve the short code on the official page. You can instead configure **Grok API Key** or **Grok Build · Local CLI / ACP**. Each initially selects **Grok 4.3 / None**. Save settings, enable SuperX and open X.
+2. Follow the setup guide that opens after installation. It recommends **Sign in with Grok**: approve the short code on the official page. You can instead paste a Grok or Claude API Key, or open the advanced guide for **Grok Build · Local CLI / ACP**. Each connection initially selects **Grok 4.3 / None** (Claude: Haiku 5.5). Then choose **Only when I click** (the default) or **Automatically** and open X. Skipping the guide leads to **Settings → Connection**.
 3. Chrome manages extension updates. If replacing an unpacked installation, disable the old copy first to avoid duplicate analysis and configure the store copy separately.
 
 For Edge or a manual GitHub installation:

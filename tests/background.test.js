@@ -95,7 +95,7 @@ function createBackground(options = {}) {
   const windows = new Map([[1, { id: 1, type: 'normal', focused: true }], ...(options.windows || [])]);
   let nextTabId = 50, nextWindowId = 600;
   const runtime = {
-    id: 'grokfirst-test', onConnect: event(), onMessage: event(),
+    id: 'grokfirst-test', onConnect: event(), onMessage: event(), onInstalled: event(),
     getURL: file => `chrome-extension://grokfirst-test/${file}`,
     getManifest: () => ({ version: '1.1.6' }),
     async sendMessage(message) { runtimeMessages.push(clone(message)); return {ok:true}; },
@@ -154,7 +154,7 @@ function createBackground(options = {}) {
   let now = options.now ?? 1800000000000;
   class ClockDate extends Date { static now() { return now; } }
   const context = vm.createContext({
-    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXClaudeKeyStore:claudeStore,SuperXClaude:claudeTransport,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
+    chrome, XGrokCore: options.retryLimit===undefined?core:{...core,AUTO_RETRY_LIMIT:options.retryLimit}, GrokFirstUI:ui, SuperXKeyStore:options.keyStore||keyStore,SuperXBuildConnectionStore:buildStore,SuperXClaudeKeyStore:claudeStore,SuperXClaude:claudeTransport,SuperXBuildSetup:setup, SuperXHistoryStore:{...historyStore,create(area){return historyStore.create(area,{now:()=>now});}}, SuperXOAuth:{ALARMS:{poll:'SUPERX_OAUTH_DEVICE_POLL',refresh:'SUPERX_OAUTH_REFRESH'},STORAGE_KEY:'superxOAuthCredential',create(value){oauthChanged=value.onChange;return oauthManager;}}, importScripts() {}, URL, AbortController, DOMException, crypto, Date: ClockDate, TextEncoder, TextDecoder,
     navigator: Object.hasOwn(options, 'navigator') ? options.navigator : { language: 'en-US' },
     SuperXBuild:{publicError:buildProvider.publicError,async close(){if(options.buildClose)await options.buildClose();},async status(input){buildStatusCalls.push(clone(input));return options.buildStatus?options.buildStatus(input):{connected:true,installed:true,available:true,authenticated:true,version:'1.0.60'};},
       async run(post,settings,callbacks){const call={post,settings,...callbacks};buildCalls.push(call);return options.buildRun?options.buildRun(call,harness):{text:'Checked '+post.id,provider:'build',searched:true,verificationStatus:'completed',model:'grok-4.7',usage:{total_tokens:17}};},
@@ -4621,4 +4621,89 @@ test('dismissing the layout notice is remembered for this extension version and 
   await until(()=>bg.local.data.layoutNoticeDismissed==='1.1.6');
   assert.equal((await bg.message({type:'GET_CONFIG'})).layoutNoticeDismissed,'1.1.6');
   assert.equal(Object.hasOwn(bg.local.data.settings,'layoutNoticeDismissed'),false);
+});
+
+// Onboarding (WP6): fresh installs start click-only; an update only opens the
+// guide for a profile that never connected, and never changes its triggers.
+function freshProfile(local={},extra={}){return createBackground({session:null,...extra,local:{settings:undefined,...local}});}
+async function installEvent(bg,reason){
+  await bg.ready();bg.chrome.runtime.onInstalled.emit({reason});
+  for(let i=0;i<30;i++)await tick();
+}
+const onboardingURL='chrome-extension://grokfirst-test/onboarding.html';
+
+test('onboarding: a fresh install seeds click-only triggers on the subscription sign-in and opens the guide once',async()=>{
+  const bg=freshProfile();await installEvent(bg,'install');
+  const saved=bg.local.data.settings;
+  assert.equal(saved.provider,'oauth');assert.equal(saved.triggerMode,'custom');assert.equal(saved.enabled,true);
+  assert.deepEqual(saved.customTriggers,{...core.DEFAULT_CUSTOM_TRIGGERS,...core.CLICK_ONLY_TRIGGERS});
+  assert.equal(core.clickOnlyTriggers(saved),true);
+  assert.equal(bg.local.data.onboarding.version,1);assert.equal(bg.local.data.onboarding.state,'pending');assert.equal(typeof bg.local.data.onboarding.at,'number');
+  assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL]);
+  assert.equal(Object.hasOwn(saved,'onboarding'),false,'onboarding progress stays outside settings');
+  bg.chrome.runtime.onInstalled.emit({reason:'install'});for(let i=0;i<30;i++)await tick();
+  assert.equal(bg.createdTabs.length,1,'the onboarding record makes the handler idempotent');
+});
+
+test('onboarding: an update opens the guide only for a never-connected profile and keeps its triggers',async()=>{
+  const settings=core.normalizeSettings({provider:'oauth',triggerMode:'automatic'});
+  const bg=freshProfile({settings});await installEvent(bg,'update');
+  assert.deepEqual(bg.local.data.settings,settings);
+  assert.equal(bg.local.data.onboarding.state,'pending');assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL]);
+  for(const reason of ['chrome_update','shared_module_update']){
+    const other=freshProfile({settings});await installEvent(other,reason);
+    assert.equal(other.createdTabs.length,0,reason);assert.equal(other.local.data.onboarding,undefined,reason);assert.deepEqual(other.local.data.settings,settings,reason);
+  }
+});
+
+test('onboarding: any saved connection, saved settings on install, or an earlier record means no guide and no seed',async()=>{
+  const settings=core.normalizeSettings({provider:'oauth',triggerMode:'automatic'});
+  const connections={
+    'xAI Key':{local:{settings},extra:{session:{apiKey:'xai-session-key'}}},
+    'Claude Key':{local:{settings,claudeApiKeyEncrypted:{fixture:'claude'}},extra:{claudeStoreState:{key:'sk-ant-'+'a'.repeat(20)}}},
+    'local Grok Build':{local:{settings,buildConnectionEncrypted:{version:1}}},
+    'Grok sign-in':{local:{settings,superxOAuthCredential:{schema:1,kind:'auth'}}},
+    'earlier record':{local:{settings,onboarding:{version:1,state:'dismissed',at:1}}},
+  };
+  for(const [label,{local,extra}] of Object.entries(connections))for(const reason of ['install','update']){
+    const bg=freshProfile(local,extra);await installEvent(bg,reason);
+    assert.equal(bg.createdTabs.length,0,`${label} (${reason})`);
+    assert.equal(bg.local.data.settings.triggerMode,'automatic',`${label} (${reason})`);
+    if(label!=='earlier record')assert.equal(bg.local.data.onboarding,undefined,`${label} (${reason})`);
+  }
+  const existing=freshProfile({settings});await installEvent(existing,'install');
+  assert.equal(existing.createdTabs.length,0);assert.equal(existing.local.data.onboarding,undefined);assert.deepEqual(existing.local.data.settings,settings);
+});
+
+test('onboarding: rail and popup Settings lead to the guide only while it is pending and nothing is connected',async()=>{
+  const popup={id:'grokfirst-test',url:onboardingURL.replace('onboarding','popup')};
+  const opened=[];const bg=freshProfile({},{openOptionsPage:()=>opened.push('options')});await installEvent(bg,'install');
+  const port=bg.connect();await until(()=>port.messages.some(m=>m.type==='CONFIG'));
+  port.send({type:'OPEN_SETTINGS',focus:'oauth'});await until(()=>bg.createdTabs.length===2);
+  assert.equal((await bg.message({type:'OPEN_SETTINGS',focus:'oauth'},popup)).ok,true);
+  assert.deepEqual(bg.createdTabs.map(tab=>tab.url),[onboardingURL,onboardingURL,onboardingURL]);assert.deepEqual(opened,[]);
+  assert.equal(bg.session.data.superxOptionsFocus.id,'oauth','a later Settings visit still focuses the connection');
+  assert.equal((await bg.message({type:'OPEN_SETTINGS'})).ok,true);assert.deepEqual(opened,['options'],'the Settings page itself is never redirected');
+  for(const state of ['done','dismissed']){
+    await bg.local.set({onboarding:{version:1,state,at:2}});
+    assert.equal((await bg.message({type:'OPEN_SETTINGS'},popup)).ok,true);
+  }
+  assert.equal(opened.length,3);assert.equal(bg.createdTabs.length,3);
+  const ready=createBackground({local:{onboarding:{version:1,state:'pending',at:1}},openOptionsPage:()=>opened.push('ready')});await ready.ready();
+  assert.equal((await ready.message({type:'OPEN_SETTINGS'},popup)).ok,true);assert.equal(opened.at(-1),'ready');assert.equal(ready.createdTabs.length,0);
+});
+
+test('onboarding: the guide page is trusted UI and connecting keeps the click-only seed',async()=>{
+  const guide={id:'grokfirst-test',url:onboardingURL};
+  const bg=freshProfile();await installEvent(bg,'install');
+  assert.equal((await bg.message({type:'GET_CONFIG'},guide)).ok,true);
+  assert.equal((await bg.message({type:'OAUTH_LOGIN',remember:true},guide)).ok,true);
+  const saved=await bg.message({type:'SAVE_KEY',apiKey:'xai-onboarding-key',remember:true,settings:{...bg.local.data.settings,provider:'api',triggerMode:'automatic'},triggerPreferencesChanged:false},guide);
+  assert.equal(saved.ok,true);assert.equal(bg.local.data.settings.provider,'api');assert.equal(core.clickOnlyTriggers(bg.local.data.settings),true);
+  const claude=await bg.message({type:'SAVE_CLAUDE_KEY',apiKey:'sk-ant-'+'b'.repeat(20),settings:{...bg.local.data.settings,provider:'claude'},triggerPreferencesChanged:false},guide);
+  assert.equal(claude.ok,true);assert.equal(bg.local.data.settings.provider,'claude');assert.equal(core.clickOnlyTriggers(bg.local.data.settings),true);
+  assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:{...bg.local.data.settings,triggerMode:'automatic'},triggerPreferencesChanged:true},guide)).ok,true);
+  assert.equal(bg.local.data.settings.triggerMode,'automatic');
+  for(const url of ['chrome-extension://grokfirst-test/onboarding.html.evil','chrome-extension://another/onboarding.html','https://x.com/onboarding.html'])
+    assert.equal((await bg.message({type:'SAVE_SETTINGS',settings:bg.local.data.settings},{id:'grokfirst-test',url})).ok,false,url);
 });

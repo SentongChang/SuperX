@@ -67,7 +67,8 @@
     ui.apply(document,uiLanguage);
     const reason = loaded ? blockedReason() : null;
     const mode=pendingMode||currentSettings.triggerMode||(currentSettings.enabled?"automatic":"paused");
-    $("enabled-label").textContent = ui.t(loaded ? mode==="paused"?"trigger.pausedStatus":reason||"trigger."+mode+"Status" : "common.loading",uiLanguage,{model:currentSettings.oauthModel});
+    const modeStatus=mode==="custom"&&core.clickOnlyTriggers(currentSettings)?"trigger.clickOnlyStatus":"trigger."+mode+"Status";
+    $("enabled-label").textContent = ui.t(loaded ? mode==="paused"?"trigger.pausedStatus":reason||modeStatus : "common.loading",uiLanguage,{model:currentSettings.oauthModel});
     $("indicator").dataset.enabled = String(loaded && !reason && mode!=="paused");
     const build=currentSettings.provider==="build",oauth=currentSettings.provider==="oauth";
     const claude=currentSettings.provider==="claude";
@@ -77,8 +78,10 @@
     renderTriggerSummary(mode);
     // Shown even after the page notice was dismissed; never while paused.
     const issue=loaded&&mode!=="paused"&&config.layoutHealth?core.layoutIssueURL(config.layoutHealth,{version:chrome.runtime.getManifest().version,userAgent:navigator.userAgent,now:Date.now()}):"";
+    // One notice line at most: a broken layout outranks the setup guide.
     $("layout-notice").hidden=!issue;
     if(issue)$("layout-report").href=issue;
+    $("setup-notice").hidden=!loaded||config.ready||Boolean(issue);
     for(const choice of triggerModes){const input=$("trigger-mode-"+choice);input.checked=choice===mode;input.disabled=busy||!loaded;}
     $("options").hidden = false;
     $("status").textContent = errorMessage ? ui.t(errorMessage.key,uiLanguage,{error:errorMessage.error}) : "";

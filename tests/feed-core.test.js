@@ -1270,6 +1270,7 @@ test('Settings history is a direct page link and popup still opens history witho
   await settleUI();await settleUI();
   assert.equal(settings.ids.has('history-enabled'),false);assert.equal(settings.ids.has('open-history'),false);
   assert.match(fs.readFileSync(path.join(__dirname,'../extension/options.html'),'utf8'),/<a href="history.html"[^>]*data-i18n="common.history"/);
+  assert.match(fs.readFileSync(path.join(__dirname,'../extension/options.html'),'utf8'),/<a href="onboarding.html" class="sidebar-page-link" data-i18n="onboarding.reopen">/);
   assert.equal(settings.messages.some(message=>['GET_HISTORY_STATUS','SET_HISTORY_ENABLED'].includes(message.type)),false);
   const fixture=uiPageFixture('popup',API_UI_SETTINGS,{session:{apiKey:undefined}});
   await settleUI();await settleUI();
@@ -2900,4 +2901,26 @@ test('the layout issue link targets the repository issue tracker and carries no 
   const chrome=new URL(core.layoutIssueURL({code:'actions',route:'home'},{version:'<b>',userAgent:'Chrome/130.1',now:0})).searchParams.get('body');
   assert.match(chrome,/SuperX version: unknown\nBrowser: Chrome 130\n/);assert.match(chrome,/X language: unknown/);
   assert.equal(core.layoutIssueURL({code:'posts',route:'other'},{version:'1',userAgent:'',now:0}),'');
+});
+
+test('click-only triggers are the post button alone and match the Claude manual set',()=>{
+  const booleans=Object.fromEntries(Object.entries(core.DEFAULT_CUSTOM_TRIGGERS).filter(([,value])=>typeof value==='boolean').map(([key])=>[key,core.effectiveTriggerSettings({provider:'claude'}).customTriggers[key]]));
+  assert.deepEqual(booleans,{...core.CLICK_ONLY_TRIGGERS});assert.equal(Object.isFrozen(core.CLICK_ONLY_TRIGGERS),true);
+  const clickOnly=core.normalizeSettings({triggerMode:'custom',customTriggers:{...core.DEFAULT_CUSTOM_TRIGGERS,...core.CLICK_ONLY_TRIGGERS,postHoverMs:2500}});
+  assert.equal(core.clickOnlyTriggers(clickOnly),true);assert.equal(clickOnly.customTriggers.postHoverMs,2500,'hover waits are kept');
+  assert.equal(core.clickOnlyTriggers({...clickOnly,triggerMode:'automatic'}),false);
+  assert.equal(core.clickOnlyTriggers({...clickOnly,triggerMode:'paused'}),false);
+  assert.equal(core.clickOnlyTriggers(core.normalizeSettings({triggerMode:'custom'})),false,'the default custom set also hovers');
+  assert.equal(core.clickOnlyTriggers({...clickOnly,customTriggers:{...clickOnly.customTriggers,detailMain:true}}),false);
+  assert.equal(core.clickOnlyTriggers({...clickOnly,customTriggers:{...clickOnly.customTriggers,manual:false}}),false);
+});
+
+test('shared OAuth helpers keep only official device pages and map every error to a known key',()=>{
+  assert.equal(core.officialOAuthURL('https://accounts.x.ai/oauth2/device?user_code=AB-12'),'https://accounts.x.ai/oauth2/device?user_code=AB-12');
+  assert.equal(core.officialOAuthURL('https://auth.x.ai/oauth2/device/verify?client_id=c'),'https://auth.x.ai/oauth2/device/verify?client_id=c');
+  for(const value of ['https://accounts.x.ai.evil.example/oauth2/device','http://accounts.x.ai/oauth2/device','https://accounts.x.ai/oauth2/token','https://accounts.x.ai/oauth2/device?device_code=x','https://u:p@accounts.x.ai/oauth2/device','https://accounts.x.ai/oauth2/device#x','javascript:alert(1)',null,'https://accounts.x.ai/oauth2/device?'+'a'.repeat(2048)])
+    assert.equal(core.officialOAuthURL(value),'',String(value).slice(0,60));
+  assert.equal(core.oauthErrorKey('OAUTH_DEVICE_EXPIRED'),'oauth.expired');assert.equal(core.oauthErrorKey('OAUTH_CANCELLED'),'oauth.canceled');
+  assert.equal(core.oauthErrorKey('SOMETHING_NEW'),'oauth.unavailable');assert.equal(core.oauthErrorKey(undefined),'oauth.unavailable');
+  for(const code of ['OAUTH_ACCESS_DENIED','OAUTH_NETWORK_ERROR','OAUTH_STORAGE_ERROR','OAUTH_REAUTH_REQUIRED','OAUTH_LOGIN_REQUIRED','OAUTH_CATALOG_ERROR'])assert.ok(ui.catalog.en[core.oauthErrorKey(code)],code);
 });

@@ -405,3 +405,19 @@ test('layout self-check copy ships in every interface language without placehold
   for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
   assert.equal(ui.t('layout.title','en'),"SuperX can't read this X layout");assert.equal(ui.t('layout.report','zh-CN'),'报告问题');
 });
+
+test('onboarding copy ships in every interface language with matching placeholders and no "verify" wording',()=>{
+  const keys=[...Object.keys(ui.catalog.en).filter(key=>key.startsWith('onboarding.')),'trigger.clickOnlyStatus'];
+  assert.equal(keys.length,33);
+  const placeholders=value=>[...value.matchAll(/\{(\w+)\}/g)].map(match=>match[1]).sort();
+  for(const key of keys){
+    const english=ui.catalog.en[key];assert.doesNotMatch(english,/verif/i,key);assert.doesNotMatch(english,/\bkey\b/,`${key}: Key is capitalised`);
+    for(const language of ui.SUPPORTED_LANGUAGES){
+      const value=ui.catalog[language][key];assert.ok(value?.trim(),`${language}: ${key}`);
+      if(language!=='en')assert.notEqual(value,english,`${language}: ${key}`);
+      assert.deepEqual(placeholders(value),placeholders(english),`${language}: ${key}`);
+    }
+  }
+  assert.deepEqual(placeholders(ui.catalog.en['onboarding.progress']),['step']);assert.deepEqual(placeholders(ui.catalog.en['onboarding.keyPrivacy']),['host']);
+  assert.equal(ui.t('onboarding.progress','zh-CN',{step:2}),'第 2 步，共 3 步');assert.equal(ui.t('trigger.clickOnlyStatus','zh-CN'),'点击即核查');
+});

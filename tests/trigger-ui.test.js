@@ -62,7 +62,7 @@ test('a failed popup mode save restores the prior selected state and exposes the
 
 test('every supported language has the complete trigger settings and interaction vocabulary',()=>{
   const keys=Object.keys(UI.catalog.en).filter(key=>key.startsWith('trigger.'));
-  assert.equal(keys.length,27);
+  assert.equal(keys.length,28);
   for(const language of UI.SUPPORTED_LANGUAGES)for(const key of keys){assert.ok(Object.hasOwn(UI.catalog[language],key),language+': '+key);assert.ok(UI.t(key,language).trim());assert.notEqual(UI.t(key,language),key);}
   assert.equal(UI.t('trigger.paused','en'),'Pause');
   assert.equal(UI.t('trigger.pausedStatus','en'),'Post fact-checking paused');
@@ -151,4 +151,25 @@ test('the popup shows one layout line with a report link only while the active t
   p.choose('paused');await settle();
   assert.equal(p.elements.get('layout-notice').hidden,true,'Nothing is reported while paused');
   assert.equal(p.messages.some(message=>/LAYOUT/.test(message.type)),false);
+});
+
+test('the popup offers the setup guide only while not connected, below a layout notice in priority',async()=>{
+  const notReady=popupFixture({ready:false});await settle();
+  assert.equal(notReady.elements.get('setup-notice').hidden,false);
+  const ready=popupFixture({ready:true});await settle();
+  assert.equal(ready.elements.get('setup-notice').hidden,true);
+  const report={code:'posts',route:'home',evidence:6,readable:0,withControls:0,language:'en'};
+  const broken=popupFixture({ready:false,layoutHealth:report});await settle();
+  assert.equal(broken.elements.get('layout-notice').hidden,false);assert.equal(broken.elements.get('setup-notice').hidden,true,'one notice line at most');
+  assert.match(fs.readFileSync(path.join(__dirname,'../extension/popup.html'),'utf8'),/<a id="setup-guide" href="onboarding.html" target="_blank" data-i18n="onboarding.reopen">/);
+  assert.equal(notReady.messages.some(message=>!['GET_UI_LANGUAGE','GET_CONFIG'].includes(message.type)),false);
+});
+
+test('a click-only custom setup reads as fact-check on click in the popup',async()=>{
+  const clickOnly=popupFixture({provider:'api',ready:true,mode:'custom',customTriggers:{...Core.DEFAULT_CUSTOM_TRIGGERS,...Core.CLICK_ONLY_TRIGGERS}});await settle();
+  assert.equal(clickOnly.elements.get('enabled-label').textContent,UI.t('trigger.clickOnlyStatus','en'));
+  const custom=popupFixture({provider:'api',ready:true,mode:'custom',customTriggers:Core.DEFAULT_CUSTOM_TRIGGERS});await settle();
+  assert.equal(custom.elements.get('enabled-label').textContent,UI.t('trigger.customStatus','en'));
+  const notReady=popupFixture({provider:'api',ready:false,mode:'custom',customTriggers:{...Core.DEFAULT_CUSTOM_TRIGGERS,...Core.CLICK_ONLY_TRIGGERS}});await settle();
+  assert.equal(notReady.elements.get('enabled-label').textContent,UI.t('status.needsKey','en'),'a missing connection still wins');
 });

@@ -83,11 +83,7 @@
     try{const result=await send({type:"GET_CLAUDE_STATUS"});claudeStatus=result;}catch{/* Other connections remain usable. */}
     renderClaude();
   }
-  function oauthErrorKey(code){return ({OAUTH_ACCESS_DENIED:"oauth.denied",OAUTH_AUTHORIZATION_DENIED:"oauth.denied",OAUTH_AUTHORIZATION_EXPIRED:"oauth.expired",OAUTH_DEVICE_EXPIRED:"oauth.expired",OAUTH_EXPIRED_TOKEN:"oauth.expired",OAUTH_NETWORK_ERROR:"oauth.networkError",OAUTH_AUTH_UNAVAILABLE:"oauth.networkError",OAUTH_NETWORK:"oauth.networkError",OAUTH_STORAGE_ERROR:"oauth.storageError",OAUTH_REAUTH_REQUIRED:"oauth.reauthRequired",OAUTH_REFRESH_UNCERTAIN:"oauth.reauthRequired",OAUTH_ACCOUNT_CHANGED:"oauth.reauthRequired",OAUTH_NOT_CONNECTED:"oauth.needsLogin",OAUTH_LOGIN_REQUIRED:"oauth.needsLogin",OAUTH_CANCELLED:"oauth.canceled",OAUTH_CATALOG_ERROR:"oauth.catalogUnavailable",OAUTH_CATALOG_FAILED:"oauth.catalogUnavailable",OAUTH_CATALOG_UNAVAILABLE:"oauth.catalogUnavailable"})[code]||"oauth.unavailable";}
-  function officialOAuthURL(value){
-    if(typeof value!=="string"||value.length>2048)return "";
-    try{const url=new URL(value);if(!["https://accounts.x.ai","https://auth.x.ai"].includes(url.origin)||url.username||url.password||url.hash||!/^\/oauth2\/device(?:\/|$)/.test(url.pathname))return "";for(const key of url.searchParams.keys())if(!["user_code","client_id"].includes(key))return "";return url.href;}catch{return "";}
-  }
+  const oauthErrorKey=core.oauthErrorKey,officialOAuthURL=core.officialOAuthURL;
   function safeOAuthStatus(raw){
     const states={disconnected:"idle",starting:"authorizing",awaiting_authorization:"authorizing",idle:"idle",authorizing:"authorizing",connected:"connected",refreshing:"refreshing",restoring:"restoring",reauth_required:"reauth_required",error:"error",logging_out:"logging_out"};
     const result={state:states[raw?.state]||"idle",connected:raw?.connected===true,remember:typeof raw?.remember==="boolean"?raw.remember:currentSettings.oauthRemember!==false,catalogModels:null};

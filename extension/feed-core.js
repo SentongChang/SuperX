@@ -110,6 +110,13 @@
     if(value?.httpStatus===429||code==='resource_exhausted')return 'limited';
     return '';
   }
+  // Extension pages show only an official xAI device page with the user code;
+  // any other URL, credential or parameter is dropped.
+  function officialOAuthURL(value){
+    if(typeof value!=='string'||value.length>2048)return '';
+    try{const url=new URL(value);if(!['https://accounts.x.ai','https://auth.x.ai'].includes(url.origin)||url.username||url.password||url.hash||!/^\/oauth2\/device(?:\/|$)/.test(url.pathname))return '';for(const key of url.searchParams.keys())if(!['user_code','client_id'].includes(key))return '';return url.href;}catch{return '';}
+  }
+  function oauthErrorKey(code){return ({OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_AUTHORIZATION_DENIED:'oauth.denied',OAUTH_AUTHORIZATION_EXPIRED:'oauth.expired',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_EXPIRED_TOKEN:'oauth.expired',OAUTH_NETWORK_ERROR:'oauth.networkError',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError',OAUTH_NETWORK:'oauth.networkError',OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_NOT_CONNECTED:'oauth.needsLogin',OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_CANCELLED:'oauth.canceled',OAUTH_CATALOG_ERROR:'oauth.catalogUnavailable',OAUTH_CATALOG_FAILED:'oauth.catalogUnavailable',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable'})[code]||'oauth.unavailable';}
   const AUTO_RETRY_DELAY_MS=3000;
   const AUTO_RETRY_LIMIT=5;
   const RETRY_CANCEL_CODES=new Set(['CANCELED','CANCELLED','BUILD_CANCELED','BUILD_CANCELLED','BUILD_CANCEL_UNCONFIRMED','RAIL_COLLAPSED']);
@@ -366,7 +373,15 @@
   // Claude bills every request to the user's own API credit. Unless the user
   // explicitly opts in, the effective trigger set is the post button only.
   // Saved trigger preferences stay untouched for the other connections.
-  const CLAUDE_MANUAL_TRIGGERS=Object.freeze({...DEFAULT_CUSTOM_TRIGGERS,manual:true,postHover:false,buttonHover:false,detailMain:false,detailReplies:false});
+  // "Only when I click": the post button and nothing else. Hover waits are
+  // numbers and stay as the user set them.
+  const CLICK_ONLY_TRIGGERS=Object.freeze({manual:true,buttonHover:false,postHover:false,detailMain:false,detailReplies:false});
+  const CLAUDE_MANUAL_TRIGGERS=Object.freeze({...DEFAULT_CUSTOM_TRIGGERS,...CLICK_ONLY_TRIGGERS});
+  function clickOnlyTriggers(settings){
+    if(triggerMode(settings)!=='custom')return false;
+    const triggers=normalizeCustomTriggers(settings.customTriggers);
+    return Object.entries(CLICK_ONLY_TRIGGERS).every(([key,value])=>triggers[key]===value);
+  }
   function claudeManualOnly(settings){return settings?.provider==='claude'&&settings.claudeAutoTrigger!==true;}
   function effectiveTriggerSettings(settings){
     if(!claudeManualOnly(settings))return settings;
@@ -1176,5 +1191,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, officialOAuthURL, oauthErrorKey, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, CLICK_ONLY_TRIGGERS, clickOnlyTriggers, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
 });

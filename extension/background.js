@@ -39,6 +39,9 @@ let historyEnabled = true, pendingCacheWrite, cacheStats = normalizeCacheStats()
 // depend on the answer language or model, and it has its own fixed lifetime.
 let triageCache = {};
 const TRIAGE_TTL = 24 * 60 * 60 * 1000, TRIAGE_CACHE_LIMIT = 500, TRIAGE_TIMEOUT_MS = 10000;
+// What this profile held when the worker started, before initialize() saves
+// normalized settings. Only onInstalled reads it, to decide on onboarding.
+let startupProfile = {settings:false,credential:false};
 const ready = initialize();
 
 async function initialize() {
@@ -59,6 +62,7 @@ async function initialize() {
   const hasSettings=local.settings&&typeof local.settings==='object'&&!Array.isArray(local.settings)&&Object.keys(local.settings).length>0;
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
+  startupProfile={settings:Boolean(hasSettings),credential:legacyConnection||ClaudeKeyStore.envelopePresent(local.claudeApiKeyEncrypted)};
   providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!['api','build','oauth','claude','native'].includes(local.settings.provider));
   if(providerFault)await chrome.storage.local.set({invalidAnswerSource:true});
   // OAuth restoration cannot delay an independent API Key or local connection.
@@ -296,7 +300,7 @@ function securityStatus() {
 }
 function isX(url) { try { return ['x.com','twitter.com'].includes(new URL(url).hostname) && new URL(url).protocol === 'https:'; } catch { return false; } }
 function isFeed(url) { return isX(url) && !/^\/(?:messages|i\/(?:chat|grok|flow|premium|settings))\b/.test(new URL(url).pathname); }
-function trustedUI(sender) { try { const url=new URL(sender.url),base=new URL(chrome.runtime.getURL(''));return sender.id===chrome.runtime.id&&url.protocol===base.protocol&&url.host===base.host&&['/options.html','/popup.html','/history.html','/setup.html'].includes(url.pathname); }catch{return false;} }
+function trustedUI(sender) { try { const url=new URL(sender.url),base=new URL(chrome.runtime.getURL(''));return sender.id===chrome.runtime.id&&url.protocol===base.protocol&&url.host===base.host&&['/options.html','/popup.html','/history.html','/setup.html','/onboarding.html'].includes(url.pathname); }catch{return false;} }
 function trustedFeed(sender) { return sender.id===chrome.runtime.id && sender.frameId===0 && Number.isInteger(sender.tab?.id) && isFeed(sender.url); }
 function explicitPostTrigger(kind) { return kind==='manual'||kind==='recheck'; }
 function postJob(job) { return !commentsJob(job)&&!draftJob(job); }
@@ -782,12 +786,30 @@ function waitForAbort(promise, signal) {
   });
 }
 
-async function openSettings(focus) {
+async function openSettings(focus,setupEntry=false) {
   // Replace stale focus requests even when the caller uses a generic Settings
   // entry point or sends an unlock target from an older content script.
   try { await chrome.storage.session.set({superxOptionsFocus:{id:focus==='oauth'||settings.provider==='oauth'?'oauth':focus==='build'||settings.provider==='build'?'build':focus==='claude'||settings.provider==='claude'?'claude':'api-key',nonce:crypto.randomUUID()}}); }
   catch { /* The settings page remains reachable when session storage fails. */ }
+  // Until the first setup is finished or skipped, the rail and popup "set me
+  // up" entry points lead to the short guide instead of the full page.
+  if(setupEntry&&!providerAllowsCalls()&&await onboardingPending()){await openOnboarding();return;}
   await chrome.runtime.openOptionsPage();
+}
+async function onboardingPending(){
+  try{return (await chrome.storage.local.get('onboarding')).onboarding?.state==='pending';}catch{return false;}
+}
+async function openOnboarding(){await chrome.tabs.create({url:chrome.runtime.getURL('onboarding.html')});}
+// A fresh install starts with "Only when I click" and opens the setup guide.
+// An update opens the guide once for a profile that never connected, and
+// never touches its triggers. The onboarding record makes this idempotent.
+async function startOnboarding(reason){
+  if(startupProfile.credential||reason==='install'&&startupProfile.settings)return;
+  const stored=await chrome.storage.local.get(['onboarding',SuperXOAuth.STORAGE_KEY]);
+  if(stored.onboarding!==undefined||stored[SuperXOAuth.STORAGE_KEY]!==undefined)return;
+  if(reason==='install')await queueSettingsMutation(()=>({...settings,triggerMode:'custom',enabled:true,customTriggers:{...settings.customTriggers,...Core.CLICK_ONLY_TRIGGERS}}));
+  await chrome.storage.local.set({onboarding:{version:1,state:'pending',at:Date.now()}});
+  await openOnboarding();
 }
 async function openHistory(){await chrome.tabs.create({url:chrome.runtime.getURL('history.html')});}
 chrome.runtime.onConnect.addListener(port => {
@@ -834,7 +856,7 @@ chrome.runtime.onConnect.addListener(port => {
       if(message.type==='DISMISS_LAYOUT_NOTICE'){if(trustedFeed(port.sender))dismissLayoutNotice();return;}
       if(message.type==='UI_LANGUAGE') { await updateUILanguage(client,message.language);return; }
       if(message.type==='CANCEL_ALL') { cancelClient(client); return; }
-      if(message.type==='OPEN_SETTINGS') { await openSettings(message.focus); return; }
+      if(message.type==='OPEN_SETTINGS') { await openSettings(message.focus,true); return; }
       if(message.type==='OPEN_HISTORY'&&trustedFeed(port.sender)){await openHistory();return;}
       if(message.type==='HISTORY_VISIT'){
         // No Key, provider call or dwell timer is required to record visibility.
@@ -1481,7 +1503,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
   }
   (async()=>{
     await ready;
-    if(message?.type==='OPEN_SETTINGS' && (trustedUI(sender)||trustedFeed(sender))) {await openSettings(message.focus);return {ok:true};}
+    if(message?.type==='OPEN_SETTINGS' && (trustedUI(sender)||trustedFeed(sender))) {await openSettings(message.focus,trustedFeed(sender)||new URL(sender.url).pathname==='/popup.html');return {ok:true};}
     if(message?.type==='OPEN_HISTORY' && (trustedUI(sender)||trustedFeed(sender))) {await openHistory();return {ok:true};}
     if(!trustedUI(sender)) return {ok:false,error:'此操作仅允许在扩展设置页中执行。'};
     if(message.type==='GET_UI_LANGUAGE')return {ok:true,language:await currentUILanguage()};
@@ -1541,6 +1563,9 @@ chrome.alarms?.onAlarm.addListener(alarm=>{
   }
 });
 chrome.runtime.onStartup?.addListener(()=>{void ready.then(()=>oauthReady).catch(()=>{});});
+chrome.runtime.onInstalled?.addListener(details=>{
+  if(['install','update'].includes(details?.reason))void ready.then(()=>startOnboarding(details.reason)).catch(()=>{});
+});
 chrome.permissions?.onRemoved?.addListener(removed=>{
   if(!removed.origins?.includes('http://127.0.0.1/*'))return;
   void ready.then(async()=>{
