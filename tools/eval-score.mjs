@@ -54,7 +54,8 @@ export function validateItem(item, {committed = true} = {}) {
   if (!DIFFICULTIES.includes(item.difficulty)) errors.push(`difficulty must be ${DIFFICULTIES.join(' or ')}`);
   if (typeof item.checkable !== 'boolean') errors.push('checkable must be a boolean');
   errors.push(...postErrors(item.post, 'post', POST_FIELDS, committed));
-  for (const [index, quote] of (Array.isArray(item.post?.quotedContext) ? item.post.quotedContext : []).entries()) errors.push(...postErrors(quote, `post.quotedContext[${index}]`, QUOTE_FIELDS, committed));
+  const quotes = Array.isArray(item.post?.quotedContext) ? item.post.quotedContext : [];
+  for (const [index, quote] of quotes.entries()) errors.push(...postErrors(quote, `post.quotedContext[${index}]`, QUOTE_FIELDS, committed));
   if (item.settings !== undefined && (Object.keys(item.settings).join() !== 'language' || !LANGUAGE_IDS.includes(item.settings.language))) errors.push('settings may only set a supported language');
   if (!expect || typeof expect !== 'object') return [...errors, 'expect is missing'];
   if (!VERDICTS.includes(expect.verdict)) errors.push(`expect.verdict must be one of ${VERDICTS.join(', ')}`);
@@ -228,8 +229,10 @@ export function summarize(scores, {stage = 'verify', repeat = 1} = {}) {
   };
   if (!triage) {
     const columns = [...VERDICTS, 'null', 'error'];
-    summary.confusion = {columns, rows: Object.fromEntries(VERDICTS.map(expected => [expected, Object.fromEntries(columns.map(column => [column,
-      scores.filter(score => score.expected === expected && (column === 'error' ? score.error : column === 'null' ? !score.error && !score.verdict : score.verdict === column)).length]))]))};
+    const returned = score => score.error ? 'error' : score.verdict || 'null';
+    const row = expected => Object.fromEntries(columns.map(column => [column,
+      scores.filter(score => score.expected === expected && returned(score) === column).length]));
+    summary.confusion = {columns, rows: Object.fromEntries(VERDICTS.map(expected => [expected, row(expected)]))};
   }
   return summary;
 }
@@ -275,9 +278,12 @@ export function renderMarkdown({run, summary}) {
   const triage = run.stage === 'triage', lines = [`# SuperX eval: ${cell(run.stage)} · ${cell(run.provider)} · ${cell(run.model)}`, ''];
   if (run.mode === 'mock') lines.push('**MOCK - pipeline check only, not model quality.**', '');
   if (run.stoppedAtBudget) lines.push(`**Stopped at the spend cap ($${run.maxUsd.toFixed(2)}); this is a partial report.**`, '');
+  if (run.mode === 'live' && run.provider === 'api' && run.committedDataset) lines.push('**Synthetic posts cannot be found by X search, so Grok reports ' +
+    'retrieval gaps on this set. Do not read a Grok-versus-Claude difference here as answer quality.**', '');
   lines.push(table(['Run', 'Value'], [
     ['Mode', run.mode], ['Stage', run.stage], ['Provider', run.provider], ['Model', run.model], ['Effort', run.effort],
     ...(run.provider === 'claude' && !triage ? [['Max searches', run.maxSearches]] : []), ['Language', run.language], ['Repeats', run.repeat],
+    ['Spend cap', run.maxUsd === null ? 'none' : `$${run.maxUsd.toFixed(2)}`],
     ['Dataset', `${run.dataset} (${run.items} items, sha256 ${run.datasetSha256.slice(0, 12)})`], ['Prompt sha256', run.promptSha256 ? run.promptSha256.slice(0, 12) : 'preset'],
     ['Git commit', run.gitCommit || 'unknown'], ['Node', run.node], ['Started', run.startedAt], ['Finished', run.finishedAt]
   ].map(([key, value]) => [key, cell(value)])), '', '## Summary', '');
@@ -286,8 +292,9 @@ export function renderMarkdown({run, summary}) {
     'Language compliance detects only a change of writing system, not es versus fr.', '');
   if (Object.keys(summary.errors).length) lines.push('## Errors', '', table(['Code', 'Items'], Object.entries(summary.errors).map(([code, count]) => [cell(code), count])), '');
   if (summary.confusion) {
+    const {columns, rows} = summary.confusion;
     lines.push('## Verdict confusion (rows expected, columns returned)', '',
-      table(['Expected', ...summary.confusion.columns], Object.entries(summary.confusion.rows).map(([expected, row]) => [expected, ...summary.confusion.columns.map(column => row[column])])), '');
+      table(['Expected', ...columns], Object.entries(rows).map(([expected, row]) => [expected, ...columns.map(column => row[column])])), '');
   }
   const accuracyKey = triage ? 'routeAgreement' : 'verdictAccuracy', accuracyLabel = triage ? 'Route agreement' : 'Verdict accuracy';
   for (const [name, breakdown] of Object.entries(summary.breakdowns)) {

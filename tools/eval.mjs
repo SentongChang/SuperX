@@ -26,7 +26,9 @@ export const PROVIDERS = Object.freeze({
   claude: Object.freeze({env: 'ANTHROPIC_API_KEY', host: 'api.anthropic.com', mockKey: 'sk-ant-eval-mock-key-0000', billing: 'the Anthropic Console'}),
   api: Object.freeze({env: 'XAI_API_KEY', host: 'api.x.ai', mockKey: 'xai-eval-mock-key-0000', billing: 'the xAI Console'})
 });
-const KEY_LIKE = /(?:sk-ant-|xai-)[A-Za-z0-9_-]{8,}/;
+// A whole argument, or the value after `=`, that is shaped like a Key. Paths
+// that merely contain `xai-` or `sk-ant-` are not Keys.
+const KEY_LIKE = /^(?:sk-ant-|xai-)[A-Za-z0-9_-]{8,}$/;
 const RETRYABLE = new Set(['RATE_LIMIT', 'API_CAPACITY']);
 const TIMEOUT_MS = 120000;
 const LANGUAGE_IDS = Core.LANGUAGES.map(language => language.value);
@@ -53,7 +55,8 @@ Runs the fact-check evaluation set. Mock mode is the default: no network, no Key
   --limit N                  difficulty or expected verdict, and all must match
   --repeat N                 Run each item N times and report verdict agreement
   --concurrency N            Default 2 live, 8 mock
-  --max-usd X                Spend cap (default 3.00); exit 3 when reached
+  --max-usd X                Spend cap (default 3.00 live, none mock); exit 3
+                             when reached
   --out DIR                  Report folder (default artifacts/eval)
   --min-verdict-accuracy X   Exit 1 when verdict accuracy is below X (0..1)
   --compare A.json B.json    Metric deltas (B minus A) and flipped items
@@ -71,10 +74,12 @@ function integer(flag, value, min, max) {
 function list(value) { return value.split(',').map(part => part.trim()).filter(Boolean); }
 
 export function parseArgs(argv) {
-  if (argv.some(arg => KEY_LIKE.test(arg))) throw new UsageError('Keys are never accepted as command-line arguments. Set ANTHROPIC_API_KEY or XAI_API_KEY in the environment.');
+  if (argv.flatMap(arg => arg.split('=')).some(part => KEY_LIKE.test(part)))
+    throw new UsageError('Keys are never accepted as command-line arguments. Set ANTHROPIC_API_KEY or XAI_API_KEY in the environment.');
   const raw = {};
   for (let index = 0; index < argv.length; index++) {
     const [flag, inline] = argv[index].split(/=(.*)/s);
+    if (inline !== undefined && (flag === '--compare' || SWITCHES.has(flag))) throw new UsageError(`${flag} takes no value after =.`);
     if (flag === '--compare') {
       raw.compare = argv.slice(index + 1, index + 3);
       if (raw.compare.length !== 2 || raw.compare.some(path => path.startsWith('--'))) throw new UsageError('--compare needs two report files.');
@@ -96,8 +101,9 @@ export function parseArgs(argv) {
     throw new UsageError('The pre-screen always uses its fixed model and prompt; --model, --effort, --max-searches, --prompt and --min-verdict-accuracy apply to --stage verify.');
   const language = raw['--language'] ?? 'auto';
   if (!LANGUAGE_IDS.includes(language)) throw new UsageError(`--language must be one of ${LANGUAGE_IDS.join(', ')}.`);
-  const maxUsd = raw['--max-usd'] === undefined ? 3 : Number(raw['--max-usd']);
-  if (!(maxUsd > 0)) throw new UsageError('--max-usd must be a positive number.');
+  // Mock runs cost nothing, so only an explicit --max-usd caps them.
+  const maxUsd = raw['--max-usd'] === undefined ? (live ? 3 : null) : Number(raw['--max-usd']);
+  if (maxUsd !== null && !(maxUsd > 0)) throw new UsageError('--max-usd must be a positive number.');
   const minVerdictAccuracy = raw['--min-verdict-accuracy'] === undefined ? null : Number(raw['--min-verdict-accuracy']);
   if (minVerdictAccuracy !== null && !(minVerdictAccuracy >= 0 && minVerdictAccuracy <= 1)) throw new UsageError('--min-verdict-accuracy must be from 0 to 1.');
   return {
@@ -124,7 +130,10 @@ export function evalSettings({provider, stage = 'verify', language = 'auto', mod
   const settings = Core.normalizeSettings(input);
   if (stage === 'triage') return settings;
   const chosenModel = Core.providerModel(settings);
-  if (model !== null && (chosenModel !== model || claude && !Core.claudeModelProfile(model))) throw new UsageError(`--model ${model} is not a ${claude ? 'Claude' : 'text'} model the extension accepts${claude ? ` (${Core.CLAUDE_MODELS.map(item => item.value).join(', ')}; measure auto with --stage triage)` : ''}.`);
+  if (model !== null && (chosenModel !== model || claude && !Core.claudeModelProfile(model))) {
+    const choices = claude ? ` (${Core.CLAUDE_MODELS.map(item => item.value).join(', ')}; measure auto with --stage triage)` : '';
+    throw new UsageError(`--model ${model} is not a ${claude ? 'Claude' : 'text'} model the extension accepts${choices}.`);
+  }
   if (!claude && Core.isNonTextGenerationModel(chosenModel)) throw new UsageError(`--model ${model} generates images or video and cannot fact-check posts.`);
   if (effort !== null && Core.providerEffort(settings) !== effort) throw new UsageError(`--effort ${effort} is not available for ${chosenModel}.`);
   if (prompt !== null && settings.verifyPrompt !== Core.normalizePrompt(prompt, '')) throw new UsageError('--prompt is empty or longer than the extension accepts.');
@@ -181,7 +190,10 @@ function claudeEvents({model, text, sources = [], search, usage}) {
     index++;
   }
   events.push({type: 'content_block_start', index, content_block: {type: 'text', text: ''}}, {type: 'content_block_delta', index, delta: {type: 'text_delta', text}});
-  for (const source of sources) events.push({type: 'content_block_delta', index, delta: {type: 'citations_delta', citation: {type: 'web_search_result_location', url: source.url, title: source.title, cited_text: '', encrypted_index: 'eval'}}});
+  for (const source of sources) {
+    const citation = {type: 'web_search_result_location', url: source.url, title: source.title, cited_text: '', encrypted_index: 'eval'};
+    events.push({type: 'content_block_delta', index, delta: {type: 'citations_delta', citation}});
+  }
   events.push({type: 'content_block_stop', index},
     {type: 'message_delta', delta: {stop_reason: 'end_turn'}, usage: {...usage, ...(search ? {server_tool_use: {web_search_requests: 1}} : {})}}, {type: 'message_stop'});
   return events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('');
@@ -263,9 +275,10 @@ async function screenOnce(post, settings, apiKey, fetchImpl) {
 function networkDisabled() { throw new Error('network disabled in mock mode'); }
 
 // Runs every selected item `repeat` times with at most `concurrency` in
-// flight. Once the estimated spend reaches `maxUsd`, nothing new starts.
+// flight. Once the estimated spend reaches `maxUsd` (null for no cap),
+// nothing new starts.
 export async function runEval({items, provider, stage = 'verify', mode = 'mock', settings, apiKey = PROVIDERS[provider].mockKey,
-  concurrency = mode === 'live' ? 2 : 8, maxUsd = Infinity, repeat = 1, fetchImpl, retryDelayMs = mode === 'live' ? Core.AUTO_RETRY_DELAY_MS : 0}) {
+  concurrency = mode === 'live' ? 2 : 8, maxUsd = null, repeat = 1, fetchImpl, retryDelayMs = mode === 'live' ? Core.AUTO_RETRY_DELAY_MS : 0}) {
   const transport = fetchImpl || (mode === 'mock' ? mockFetch(items, provider) : liveFetch(provider));
   const attempt = stage === 'triage' ? screenOnce : checkOnce, score = stage === 'triage' ? scoreTriage : scoreItem;
   const jobs = items.flatMap(item => Array.from({length: repeat}, (_, index) => ({item, repeat: index})));
@@ -285,7 +298,7 @@ export async function runEval({items, provider, stage = 'verify', mode = 'mock',
       }
       scores.push({order, score: score(item, {...outcome, attempts}, index)});
       totalUsd += outcome.costUsd;
-      if (totalUsd >= maxUsd) stopped = true;
+      if (maxUsd !== null && totalUsd >= maxUsd) stopped = true;
     }
   }
   const realFetch = globalThis.fetch;
@@ -309,9 +322,9 @@ export function buildReport({options, settings, items, outcome, dataset = DEFAUL
     mode: options.mode, stage: options.stage, provider: options.provider,
     model: triage ? Core.CLAUDE_TRIAGE_MODEL : Core.providerModel(settings), effort: triage ? 'low' : Core.providerEffort(settings),
     maxSearches: settings.claudeMaxSearches, language: options.language, repeat: options.repeat ?? 1,
-    dataset: relative(root, resolve(dataset)) || basename(dataset), items: items.length, datasetSha256: sha256(JSON.stringify(items)),
+    dataset: relative(root, resolve(dataset)) || basename(dataset), committedDataset: resolve(dataset) === DEFAULT_DATASET, items: items.length, datasetSha256: sha256(JSON.stringify(items)),
     promptSha256: options.prompt ? sha256(options.prompt) : '', gitCommit: gitCommit(), node: process.version, startedAt, finishedAt,
-    maxUsd: options.maxUsd ?? Infinity, totalUsd: outcome.totalUsd, stoppedAtBudget: outcome.stoppedAtBudget
+    maxUsd: options.maxUsd ?? null, totalUsd: outcome.totalUsd, stoppedAtBudget: outcome.stoppedAtBudget
   };
   return {run, summary: summarize(outcome.scores, {stage: options.stage, repeat: run.repeat}), scores: outcome.scores};
 }
@@ -351,7 +364,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, log 
   const {env: variable, mockKey} = PROVIDERS[options.provider];
   const apiKey = options.mode === 'live' ? env[variable]?.trim() : mockKey;
   if (!apiKey) throw new UsageError(`--live requires ${variable} in the environment. Keys are never accepted as command-line arguments.`);
-  if (options.mode === 'live' && !(options.provider === 'claude' ? Claude.validKey(apiKey) : /^xai-/.test(apiKey))) log(`Warning: ${variable} does not look like a ${options.provider === 'claude' ? 'Claude' : 'xAI'} API Key.`);
+  const claudeKey = options.provider === 'claude';
+  if (options.mode === 'live' && !(claudeKey ? Claude.validKey(apiKey) : /^xai-/.test(apiKey)))
+    log(`Warning: ${variable} does not look like a ${claudeKey ? 'Claude' : 'xAI'} API Key.`);
   const prompt = options.prompt === null ? null : await readFile(options.prompt, 'utf8').catch(error => { throw new UsageError(`Cannot read --prompt: ${error.message}`); });
   const dataset = options.dataset ?? DEFAULT_DATASET;
   const items = selectItems(await loadDataset(dataset), options), settings = evalSettings({...options, prompt});

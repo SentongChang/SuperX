@@ -71,7 +71,8 @@ The Anthropic or xAI Console is the billing record. As a rough guide for the
 and Sonnet 5.5 several times more; the pre-screen stage costs a fraction of a
 cent per item.
 
-`--max-usd` (default 3.00) caps a run. The total is checked after each item, so
+`--max-usd` (default 3.00) caps a live run. Mock runs cost nothing and have no
+cap unless you pass `--max-usd`. The total is checked after each item, so
 up to `--concurrency` items already in flight can still finish past the cap.
 When the cap stops a run, the partial report is written, marked as stopped at
 the spend cap, and the command exits with code 3.
@@ -94,7 +95,7 @@ the spend cap, and the command exits with code 3.
 | `--limit N` | all | First N selected items |
 | `--repeat N` | 1 | Run each item N times; adds verdict agreement |
 | `--concurrency N` | 2 live, 8 mock | Items in flight |
-| `--max-usd X` | 3.00 | Spend cap |
+| `--max-usd X` | 3.00 live, none mock | Spend cap |
 | `--out DIR` | artifacts/eval | Report folder |
 | `--min-verdict-accuracy X` | none | Exit 1 below this accuracy (0 to 1) |
 
@@ -200,7 +201,8 @@ fictional-account rules apply only to the committed set.
 - Synthetic posts cannot be found by X search. The Grok prompts ask the model
   to retrieve the original post first, so live `--provider api` runs report
   retrieval gaps on this set, and Grok-versus-Claude comparisons on it are
-  biased. Use a private set of real public posts to measure retrieval.
+  biased. A live `--provider api` report on the committed set says so at the
+  top. Use a private set of real public posts to measure retrieval.
 - The language check detects only a change of writing system, so it cannot
   tell Spanish from French or German.
 - Pattern scoring is brittle across paraphrase. Read the failure list in the

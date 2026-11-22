@@ -120,6 +120,27 @@ test('mock Claude run goes through the real provider path with no network', asyn
   }
 });
 
+test('an answer without a VERDICT line counts as a marker miss on the real provider path', async () => {
+  const {items, harness, score} = await load();
+  const target = items[0], base = harness.mockFetch(items, 'claude');
+  const fetchImpl = async (url, init) => {
+    const response = await base(url, init);
+    if (!init.body.includes(target.post.url)) return response;
+    const stream = await new Response(response.body).text(), stripped = stream.replace(/VERDICT: [A-Z_]+(?:; LIMITS: [A-Z,]+)?\\n/, '');
+    assert.notEqual(stripped, stream);
+    return {...response, body: new Response(stripped).body};
+  };
+  const outcome = await harness.runEval({items, provider: 'claude', settings: harness.evalSettings({provider: 'claude'}), fetchImpl});
+  const missed = outcome.scores.find(scored => scored.id === target.id);
+  assert.equal(missed.error, null);
+  assert.equal(missed.verdictMissing, true);
+  assert.equal(missed.pass, false);
+  const summary = score.summarize(outcome.scores);
+  assert.equal(summary.metrics.verdictNullRate, 1 / items.length);
+  assert.equal(summary.confusion.rows[target.expect.verdict].null, 1);
+  assert.equal(Object.values(summary.confusion.rows).reduce((total, row) => total + row.null, 0), 1);
+});
+
 test('mock xAI run reports cost from the provider ticks and contacts only api.x.ai', async () => {
   const {items, harness, score} = await load();
   const settings = harness.evalSettings({provider: 'api'});
@@ -252,6 +273,22 @@ test('the spend cap stops new checks and marks the partial report', async () => 
   } finally { await rm(out, {recursive: true, force: true}); }
 });
 
+test('only live runs have a default spend cap', async () => {
+  const {items, harness} = await load();
+  assert.equal(harness.parseArgs([]).maxUsd, null);
+  assert.equal(harness.parseArgs(['--live']).maxUsd, 3);
+  assert.equal(harness.parseArgs(['--max-usd', '0.5']).maxUsd, 0.5);
+  // 20 repeats of the set cost well over $3 at mock prices and still finish.
+  const outcome = await harness.runEval({items, provider: 'claude', settings: harness.evalSettings({provider: 'claude'}), repeat: 20});
+  assert.ok(outcome.totalUsd > 3);
+  assert.equal(outcome.stoppedAtBudget, false);
+  assert.equal(outcome.scores.length, items.length * 20);
+  const report = harness.buildReport({options: harness.parseArgs([]), settings: harness.evalSettings({provider: 'claude'}), items, outcome,
+    startedAt: 'A', finishedAt: 'A'});
+  assert.equal(JSON.parse(JSON.stringify(report)).run.maxUsd, null);
+  assert.match((await import('../tools/eval-score.mjs')).renderMarkdown(report), /\| Spend cap \| none \|/);
+});
+
 test('the command line refuses Keys as arguments, missing env Keys and headless-incapable connections', async () => {
   const live = cli(['--live']);
   assert.equal(live.status, 2);
@@ -261,6 +298,12 @@ test('the command line refuses Keys as arguments, missing env Keys and headless-
   assert.equal(argument.status, 2);
   assert.match(argument.stderr, /never accepted as command-line arguments/);
   assert.ok(!argument.stderr.includes('abcdefghijklmnop'));
+  assert.match(cli(['--model=xai-abcdefghijklmnop']).stderr, /never accepted as command-line arguments/);
+  const {harness} = await load();
+  // A path that merely names the provider is not a Key.
+  assert.equal(harness.parseArgs(['--dataset', 'eval-local/xai-responses-set.json']).dataset, 'eval-local/xai-responses-set.json');
+  assert.throws(() => harness.parseArgs(['--live=false']), /--live takes no value/);
+  assert.throws(() => harness.parseArgs(['--compare=A.json', 'B.json']), /--compare takes no value/);
   for (const provider of ['oauth', 'build']) {
     const result = cli(['--provider', provider]);
     assert.equal(result.status, 2);
@@ -329,4 +372,16 @@ test('reports escape untrusted text in tables and cannot have their fences close
   assert.equal((fence.match(/^```/gm) || []).length, 2);
   assert.ok(fence.includes('`\u200b``\n# Injected'));
   assert.ok(markdown.includes(fence));
+});
+
+test('a live Grok report on the committed set warns that retrieval biases the comparison', async () => {
+  const {items, harness, score} = await load();
+  const outcome = {scores: [], totalUsd: 0, stoppedAtBudget: false};
+  const render = (options, dataset) => score.renderMarkdown(harness.buildReport({options: {stage: 'verify', language: 'auto', maxUsd: 3, ...options},
+    settings: harness.evalSettings({provider: options.provider}), items, outcome, dataset, startedAt: 'A', finishedAt: 'A'}));
+  const warning = /Synthetic posts cannot be found by X search/;
+  assert.match(render({mode: 'live', provider: 'api'}), warning);
+  assert.doesNotMatch(render({mode: 'live', provider: 'api'}, path.join(root, 'eval-local/real-posts.json')), warning);
+  assert.doesNotMatch(render({mode: 'live', provider: 'claude'}), warning);
+  assert.doesNotMatch(render({mode: 'mock', provider: 'api'}), warning);
 });
