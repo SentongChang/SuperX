@@ -16,7 +16,7 @@
   "web_accessible_resources": [{"resources": ["assets/superx-symbol.svg"], "matches": ["https://x.com/*", "https://twitter.com/*"]}],
   "content_scripts": [{
     "matches": ["https://x.com/*", "https://twitter.com/*"],
-    "js": ["x-dom.js", "source-quality.js", "feed-core.js", "ui-i18n.js", "overlay-layout.js", "marked.umd.js", "markdown-renderer.js", "draft-composer.js", "content.js"],
+    "js": ["x-dom.js", "provider-registry.js", "source-quality.js", "feed-core.js", "ui-i18n.js", "overlay-layout.js", "marked.umd.js", "markdown-renderer.js", "draft-composer.js", "content.js"],
     "run_at": "document_idle"
   }]
 }

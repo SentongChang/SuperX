@@ -306,9 +306,8 @@
     const limit=Core.accountLimitReason?.(diagnostic)||(['quota','credits','spending','rate','limited'].includes(diagnostic.reason)?diagnostic.reason:'');
     return limit?'account.'+limit:({auth:'oauth.catalogAuth',access:'oauth.catalogAccess',server:'oauth.catalogServer',network:'oauth.catalogNetwork',timeout:'oauth.catalogTimeout',response:'oauth.catalogResponse'})[diagnostic.reason]||'oauth.catalogConnected';
   }
-  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||['oauth.usageError','error.apiUsage','status.rateLimited','claude.budgetReached','claude.requestRejected'].includes(key));}
   function renderUsageLinks(target,provider) {
-    const links=(provider==='claude'?[['claude.billingLink','https://platform.claude.com/settings/billing']]:[['account.viewUsage','https://grok.com/dashboard/usage'],...(provider==='api'?[['account.viewConsole','https://console.x.ai/']]:[])]).map(([key,url])=>[t(key),url]);
+    const links=Core.providers.resolve(provider).usageLinks.map(([key,url])=>[t(key),url]);
     const signature=JSON.stringify(links);if(target.usageSignature===signature)return;target.usageSignature=signature;
     target.replaceChildren();
     for(const [label,url] of links){
@@ -316,7 +315,7 @@
     }
   }
   async function openSettings() {
-    const message={type:'OPEN_SETTINGS',focus:settings.provider==='oauth'?'oauth':settings.provider==='build'?'build':settings.provider==='claude'?'claude':'api-key'};
+    const message={type:'OPEN_SETTINGS',focus:Core.providers.resolve(settings.provider).settingsFocus};
     // Settings can add or replace a Key. Restore the feed subscription so its
     // updated CONFIG can reach a tab that previously had no usable credential.
     if(workerSleeping)connect();
@@ -339,12 +338,12 @@
     railHeader.setAttribute('lang',uiLanguage);railHeader.setAttribute('dir',direction);
     rail.setAttribute('aria-label',t('aria.rail'));railLanguage.setAttribute('aria-label',t('aria.outputLanguage'));
     const auto=Array.from(railLanguage.children).find(option=>option.value==='auto');if(auto)auto.textContent=t('lang.auto').split(' · ')[0];railLanguage.title=t(settings.language==='auto'?'lang.auto':'aria.outputLanguage');
-    railOptions.setAttribute('aria-label',t('common.settings'));railOptions.title=t(needsPageRefresh?'status.refreshRequired':!providerReady?(settings.provider==='oauth'?'oauth.login':settings.provider==='build'?'popup.setupBuild':'common.enterKey'):'common.settings');
+    railOptions.setAttribute('aria-label',t('common.settings'));railOptions.title=t(needsPageRefresh?'status.refreshRequired':!providerReady?Core.providers.resolve(settings.provider).labels.setup:'common.settings');
     railHistory.setAttribute('aria-label',t('common.history'));railHistory.title=t('common.history');
     railCollapse.setAttribute('aria-label',t('common.collapse'));railCollapse.title=t('tooltip.collapse');
     railExpand.setAttribute('aria-label',t('common.expand'));railExpand.title=t('tooltip.expand');
     renderLayoutNotice();
-    railHeader.title=settings.provider==='oauth'?t('oauth.modeLabel',{count:settings.apiConcurrency}):settings.provider==='claude'?t('claude.modeLabel',{count:settings.apiConcurrency}):settings.provider==='build'?t('popup.buildLabel',{transport:settings.buildTransport.toUpperCase()}):t('tooltip.apiMode',{count:settings.apiConcurrency});
+    railHeader.title=t(Core.providers.resolve(settings.provider).labels.rail,{count:settings.apiConcurrency,transport:String(settings.buildTransport).toUpperCase()});
   }
   function syncUILanguage() {
     const observed=UI.normalizeLanguage(document.documentElement.getAttribute('lang') || navigator.language || 'en');
@@ -423,7 +422,7 @@
       entry.ui.diagnosticText.textContent='';entry.ui.diagnostics.hidden=true;entry.verificationDiagnostics=false;
     }
     const help=entry.ui.usageHelp;
-    if(help){help.hidden=!(isUsageIssue(entry.statusKey)||entry.commentStatus==='error'&&isUsageIssue(entry.commentError)||limit);if(!help.hidden)renderUsageLinks(help,settings.provider);}
+    if(help){help.hidden=!(Core.isUsageIssue(entry.statusKey)||entry.commentStatus==='error'&&Core.isUsageIssue(entry.commentError)||limit);if(!help.hidden)renderUsageLinks(help,settings.provider);}
   }
   function syncLoading(entry) {
     const active=['queued','running'].includes(entry.status);
@@ -436,53 +435,13 @@
     entry.ui.analysisDivider.hidden=!entry.answerSplit||!(verifying||entry.verificationRendered?.trim());
     entry.ui.box.setAttribute('aria-busy',String(active||entry.status==='retry-wait'));
   }
-  function claudeErrorKey(code,failure) {
-    if(code==='CLAUDE_BUDGET')return 'claude.budgetReached';
-    if(code!=='API_ERROR')return '';
-    const http=failure?.httpStatus,provider=Core.apiFailureProviderCode(failure?.providerCode);
-    if(http===401||['authentication_error','invalid_api_key'].includes(provider))return 'claude.keyRejected';
-    if(http>=500||failure?.code==='SERVER')return 'claude.serverError';
-    if(http===400||http===402||http===403||http===404||['invalid_request_error','billing_error','permission_error','not_found_error'].includes(provider))return 'claude.requestRejected';
-    return '';
-  }
   function errorKey(code,failure) {
-    if(settings.provider==='claude'||code==='CLAUDE_BUDGET'){const key=claudeErrorKey(code,failure);if(key)return key;}
-    if(code==='MODEL_UNSUPPORTED')return 'error.modelUnsupported';
-    if(code==='MEDIA_INPUT_LIMIT')return 'error.mediaLimit';
-    if(code==='API_IMAGE_INPUT')return 'error.apiImageInput';
-    if(code==='BUILD_IMAGE_UNSUPPORTED')return 'build.imageUnsupported';
-    if(code==='BUILD_IMAGE_UNAVAILABLE')return 'build.imageUnavailable';
-    if(code==='BUILD_IMAGE_LIMIT')return 'build.imageLimit';
     if(['OAUTH_MODEL_UNAVAILABLE','OAUTH_CATALOG_UNAVAILABLE'].includes(code)&&oauthState.catalogErrorCode)return catalogIssueKey(oauthState.catalogDiagnostics);
-    if(typeof code==='string'&&code.startsWith('OAUTH_'))return ({
-      OAUTH_LOGIN_REQUIRED:'oauth.needsLogin',OAUTH_REAUTH_REQUIRED:'oauth.reauthRequired',OAUTH_ACCOUNT_CHANGED:'oauth.reauthRequired',OAUTH_REFRESH_UNCERTAIN:'oauth.reauthRequired',
-      OAUTH_ACCESS_DENIED:'oauth.denied',OAUTH_DEVICE_EXPIRED:'oauth.expired',OAUTH_CANCELLED:'oauth.canceled',
-      OAUTH_MODEL_UNAVAILABLE:'oauth.modelUnavailable',OAUTH_STORAGE_ERROR:'oauth.storageError',OAUTH_CATALOG_UNAVAILABLE:'oauth.catalogUnavailable',OAUTH_AUTH_UNAVAILABLE:'oauth.networkError'
-    })[code]||'oauth.unavailable';
-    if(isCapacityFailure(code,failure))return 'error.apiCapacity';
-    if(code?.startsWith('BUILD_'))return ({BUILD_LOGIN_REQUIRED:'build.login',BUILD_CANCEL_UNCONFIRMED:'build.cancelUnconfirmed',BUILD_CONNECTION_REQUIRED:'build.codeRequired',BUILD_AUTH_FAILED:'build.codeInvalid',BUILD_UNAVAILABLE:'build.missing',BUILD_DISCONNECTED:'build.missing',BUILD_NATIVE_MISSING:'build.missing',BUILD_VERSION_UNSUPPORTED:'build.unsupported',BUILD_MODEL_UNSUPPORTED:'build.unsupported',BUILD_EFFORT_UNSUPPORTED:'build.unsupported'})[code]||'build.unavailable';
-    const limit=Core.accountLimitReason?.(failure)||(code==='RATE_LIMIT'||failure?.code==='RATE_LIMIT'?'limited':'');
-    if(limit)return 'account.'+limit;
-    const http=failure?.httpStatus,provider=Core.apiFailureProviderCode(failure?.providerCode);
-    if(code==='API_ERROR'){
-      if(http===401||['invalid_api_key','authentication_error','unauthenticated'].includes(provider))return settings.provider==='oauth'?'oauth.reauthRequired':'error.apiKeyRejected';
-      if(http===402||['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded'].includes(provider))return settings.provider==='oauth'?'oauth.usageError':'error.apiUsage';
-      if(http===403||['permission_error','permission_denied','forbidden'].includes(provider))return settings.provider==='oauth'?'oauth.permissionError':'error.apiAccess';
-      if(http===429||failure?.code==='RATE_LIMIT')return 'status.rateLimited';
-      if(failure?.code==='CONNECTION')return 'error.apiConnection';
-      if(http>=500||failure?.code==='SERVER')return 'error.apiServer';
-      if(http>=400&&http<500||failure?.code==='ACCESS')return 'error.apiRequest';
-      return 'error.apiFailed';
-    }
-    if(['API_STREAM_INTERRUPTED','API_STREAM_ERROR'].includes(code))return 'error.apiConnection';
-    if(code==='TIMEOUT')return 'error.apiTimeout';
-    if(code==='API_INCOMPLETE')return failure?.code==='OUTPUT_LIMIT'?'error.apiOutputLimit':'error.apiIncomplete';
-    return ({RATE_LIMIT:'status.rateLimited',NEEDS_KEY:'status.needsKey',KEY_MIGRATION_REQUIRED:'status.needsKey',
-      CANCELLED:'status.cancelled',RAIL_COLLAPSED:'status.disabled',URL_SEARCH_REQUIRED:'error.urlSearchRequired',API_LANGUAGE_MISMATCH:'error.outputLanguageMismatch'})[code]||'status.failed';
+    return Core.providerErrorKey(code,failure,settings.provider);
   }
   function requestSnapshot(entry,requestId,task='analysis') {
     return {requestId,task,entry,postSnapshot:entry.post,apiIdentity:Core.apiPostIdentity(entry.post,task==='comments'?undefined:settings),path:pageRouteKey(),provider:settings.provider,
-      language:settings.language,apiModel:settings.provider==='claude'?Core.providerModel(settings):settings.provider==='oauth'?settings.oauthModel:settings.provider==='build'?settings.buildModel:settings.apiModel,
+      language:settings.language,apiModel:Core.providerModel(settings),
       verifyPrompt:settings.verifyPrompt,commentsPrompt:settings.commentsPrompt};
   }
   function savedAnswerIdentity(entry) {
@@ -545,7 +504,7 @@
     }
     scheduleLayout();tick();
   }
-  function isAccountLimit(failure) {return settings.provider==='api'&&(failure?.httpStatus===402||['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded'].includes(Core.apiFailureProviderCode(failure?.providerCode)));}
+  function isAccountLimit(failure) {return Core.providers.get(settings.provider)?.caps.accountLimits===true&&(failure?.httpStatus===402||['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded'].includes(Core.apiFailureProviderCode(failure?.providerCode)));}
   function isCapacityFailure(code,failure) {return code==='API_CAPACITY'||failure?.errorCode==='API_CAPACITY';}
   function retryPhase(entry,task,phase,message={}) {
     const key=task==='comments'?'commentRetry':'analysisRetry';

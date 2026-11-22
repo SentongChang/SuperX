@@ -70,11 +70,10 @@
     const modeStatus=mode==="custom"&&core.clickOnlyTriggers(currentSettings)?"trigger.clickOnlyStatus":"trigger."+mode+"Status";
     $("enabled-label").textContent = ui.t(loaded ? mode==="paused"?"trigger.pausedStatus":reason||modeStatus : "common.loading",uiLanguage,{model:currentSettings.oauthModel});
     $("indicator").dataset.enabled = String(loaded && !reason && mode!=="paused");
-    const build=currentSettings.provider==="build",oauth=currentSettings.provider==="oauth";
-    const claude=currentSettings.provider==="claude";
-    $("provider-label").textContent = ui.t(claude?"claude.modeLabel":oauth?"popup.oauthLabel":build ? "popup.buildLabel" : "popup.apiLabel",uiLanguage,{count:currentSettings.apiConcurrency,transport:currentSettings.buildTransport.toUpperCase()});
+    const labels=core.providers.resolve(currentSettings.provider).labels,claude=currentSettings.provider==="claude";
+    $("provider-label").textContent = ui.t(labels.popup,uiLanguage,{count:currentSettings.apiConcurrency,transport:String(currentSettings.buildTransport).toUpperCase()});
     $("provider-hint").hidden = mode==="custom"&&!claude;
-    $("provider-hint").textContent = claude&&mode!=="paused"?claudeHint():mode==="custom"?"":ui.t(mode==="automatic"?(oauth?"popup.oauthHint":build?"popup.buildHint":"popup.apiHint"):"trigger.pausedHelp",uiLanguage);
+    $("provider-hint").textContent = claude&&mode!=="paused"?claudeHint():mode==="custom"?"":ui.t(mode==="automatic"?labels.hint:"trigger.pausedHelp",uiLanguage);
     renderTriggerSummary(mode);
     // Shown even after the page notice was dismissed; never while paused.
     const issue=loaded&&mode!=="paused"&&config.layoutHealth?core.layoutIssueURL(config.layoutHealth,{version:chrome.runtime.getManifest().version,userAgent:navigator.userAgent,now:Date.now()}):"";
@@ -93,7 +92,7 @@
   }
   function showError(key,error) { errorMessage = {key,error};render(); }
   async function openKeySettings() {
-    const result = await chrome.runtime.sendMessage({type:"OPEN_SETTINGS",focus:currentSettings.provider==="oauth"?"oauth":currentSettings.provider==="build" ? "build" : currentSettings.provider==="claude" ? "claude" : "api-key"});
+    const result = await chrome.runtime.sendMessage({type:"OPEN_SETTINGS",focus:core.providers.resolve(currentSettings.provider).settingsFocus});
     if (!result?.ok) throw new Error(ui.t("errors.noResponse",uiLanguage));
   }
   async function load() {

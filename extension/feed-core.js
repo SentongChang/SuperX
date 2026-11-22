@@ -2,11 +2,12 @@
   'use strict';
   const node = typeof module === 'object' && module.exports;
   const dom = root?.SuperXXDOM || (node ? require('./x-dom.js') : undefined);
+  const providers = root?.SuperXProviders || (node ? require('./provider-registry.js') : undefined);
   const sources = root?.SuperXSourceQuality || (node ? require('./source-quality.js') : undefined);
-  const core = factory(dom, sources);
+  const core = factory(dom, providers, sources);
   if (node) module.exports = core;
   if (root) root.XGrokCore = core;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM, Sources) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (DOM, Providers, Sources) {
   'use strict';
 
   const LANGUAGES = Object.freeze([
@@ -110,6 +111,42 @@
     if(value?.httpStatus===429||code==='resource_exhausted')return 'limited';
     return '';
   }
+  // The i18n key for a failed check. A connection's own API ladder answers
+  // first, then the owner of a prefixed code; the shared ladders follow.
+  // The OAuth catalog case needs live sign-in state and stays with the caller.
+  function providerErrorKey(code,failure,provider) {
+    const selected=Providers.resolve(provider),owner=Providers.codeOwner(code);
+    const http=failure?.httpStatus,providerCode=apiFailureProviderCode(failure?.providerCode);
+    const own=code==='API_ERROR'&&selected.errors.apiError?.(http,providerCode,failure);
+    if(own)return own;
+    const owned=owner&&(owner.errors.codes[code]||owner.errors.fallback);
+    if(owned)return owned;
+    if(code==='MODEL_UNSUPPORTED')return 'error.modelUnsupported';
+    if(code==='MEDIA_INPUT_LIMIT')return 'error.mediaLimit';
+    if(code==='API_IMAGE_INPUT')return 'error.apiImageInput';
+    if(code==='API_CAPACITY'||failure?.errorCode==='API_CAPACITY')return 'error.apiCapacity';
+    const limit=accountLimitReason(failure)||(code==='RATE_LIMIT'||failure?.code==='RATE_LIMIT'?'limited':'');
+    if(limit)return 'account.'+limit;
+    if(code==='API_ERROR'){
+      const override=selected.errors.apiOverrides||{};
+      if(http===401||['invalid_api_key','authentication_error','unauthenticated'].includes(providerCode))return override.keyRejected||'error.apiKeyRejected';
+      if(http===402||['insufficient_quota','insufficient_credits','spending_limit','usage_limit_exceeded'].includes(providerCode))return override.usage||'error.apiUsage';
+      if(http===403||['permission_error','permission_denied','forbidden'].includes(providerCode))return override.access||'error.apiAccess';
+      if(http===429||failure?.code==='RATE_LIMIT')return 'status.rateLimited';
+      if(failure?.code==='CONNECTION')return 'error.apiConnection';
+      if(http>=500||failure?.code==='SERVER')return 'error.apiServer';
+      if(http>=400&&http<500||failure?.code==='ACCESS')return 'error.apiRequest';
+      return 'error.apiFailed';
+    }
+    if(['API_STREAM_INTERRUPTED','API_STREAM_ERROR'].includes(code))return 'error.apiConnection';
+    if(code==='TIMEOUT')return 'error.apiTimeout';
+    if(code==='API_INCOMPLETE')return failure?.code==='OUTPUT_LIMIT'?'error.apiOutputLimit':'error.apiIncomplete';
+    return ({RATE_LIMIT:'status.rateLimited',NEEDS_KEY:'status.needsKey',KEY_MIGRATION_REQUIRED:'status.needsKey',
+      CANCELLED:'status.cancelled',RAIL_COLLAPSED:'status.disabled',URL_SEARCH_REQUIRED:'error.urlSearchRequired',API_LANGUAGE_MISMATCH:'error.outputLanguageMismatch'})[code]||'status.failed';
+  }
+  // Errors that a usage or billing page can resolve.
+  const USAGE_ISSUE_KEYS=new Set(['status.rateLimited',...Providers.list.flatMap(descriptor=>descriptor.usageIssueKeys)]);
+  function isUsageIssue(key) {return typeof key==='string'&&(key.startsWith('account.')||key.startsWith('oauth.catalog')||USAGE_ISSUE_KEYS.has(key));}
   // Extension pages show only an official xAI device page with the user code;
   // any other URL, credential or parameter is dropped.
   function officialOAuthURL(value){
@@ -145,7 +182,7 @@
     if(failures.some(item=>item.code==='ACCESS'))return {retryable:false,reason:'request_rejected'};
     // OAuth refresh is owned by the credential manager. A model request whose
     // result is unknown must never be replayed by the generic retry scheduler.
-    if(values.some(item=>item.provider==='oauth')||codes.some(code=>typeof code==='string'&&code.startsWith('OAUTH_')))return {retryable:false,reason:'oauth_no_replay'};
+    if(values.some(item=>Providers.get(item.provider)?.autoRetry===false)||codes.some(code=>Providers.codeOwner(code)?.autoRetry===false))return {retryable:false,reason:'oauth_no_replay'};
     if(codes.includes('API_CAPACITY'))return {retryable:true,reason:'capacity'};
     if(codes.some(code=>['RATE_LIMIT','BUILD_RATE_LIMIT','BUILD_QUOTA','BUILD_BUSY'].includes(code))||statuses.includes(429)||failures.some(item=>item.code==='RATE_LIMIT'))return {retryable:true,reason:'rate_limit'};
     if(statuses.some(status=>status>=500))return {retryable:true,reason:'server'};
@@ -321,9 +358,7 @@
     const listed=CHECK_GAPS.filter(gap=>!['links','search'].includes(gap)&&limits.includes(gap));
     return 'VERDICT: '+verdict.toUpperCase()+(listed.length?'; LIMITS: '+listed.join(',').toUpperCase():'');
   }
-  // Until the provider registry lands, this is the single place that knows
-  // which connections can read X posts directly.
-  function providerCanSearchX(settings) {return settings?.provider!=='claude'&&settings?.xSearch===true;}
+  function providerCanSearchX(settings) {return Providers.resolve(settings?.provider).caps.xSearch&&settings?.xSearch===true;}
   // Gaps come mostly from facts the extension already knows. The model's own
   // LIMITS can add to them but never remove one. A draft is read in full, so
   // its only gaps are unsent attachments and a missing search. `webFetch` is
@@ -382,7 +417,8 @@
     const triggers=normalizeCustomTriggers(settings.customTriggers);
     return Object.entries(CLICK_ONLY_TRIGGERS).every(([key,value])=>triggers[key]===value);
   }
-  function claudeManualOnly(settings){return settings?.provider==='claude'&&settings.claudeAutoTrigger!==true;}
+  // Named for the only connection that has an opt-in today (see the registry).
+  const claudeManualOnly=Providers.manualOnly;
   function effectiveTriggerSettings(settings){
     if(!claudeManualOnly(settings))return settings;
     const mode=triggerMode(settings);
@@ -422,10 +458,10 @@
   }
   // The paid Claude pre-screen. 'skip' may stop an automatic check that has no
   // checkable claim; 'route' only picks Auto's model. Drafts and comments are
-  // never screened. Until the provider registry lands, this is the one place
-  // that knows only Claude offers a cheap priced screener.
+  // never screened. Only a connection with caps.triage offers the screener;
+  // the settings it reads are Claude's because Claude is the only one.
   function triageApplies(settings, kind) {
-    if (settings?.provider !== 'claude' || settings.task) return null;
+    if (Providers.get(settings?.provider)?.caps.triage !== true || settings.task) return null;
     if (settings.claudeAutoTrigger === true && settings.claudeTriage !== false && automaticTrigger(kind)) return 'skip';
     return settings.claudeModel === CLAUDE_AUTO ? 'route' : null;
   }
@@ -589,7 +625,7 @@
     const mode=triggerMode(value);
     return {
       // The retired page automation provider is unrelated to Grok Build.
-      provider: ['api','build','oauth','claude'].includes(value.provider) ? value.provider : defaultProvider,
+      provider: Providers.has(value.provider) ? value.provider : defaultProvider,
       enabled: mode!=='paused',
       triggerMode: mode,
       customTriggers: normalizeCustomTriggers(value.customTriggers),
@@ -1056,7 +1092,7 @@
   function apiPostIdentity(post, settings) {
     // Comments still pass no settings because they use their visible snapshot
     // and analysis context. Native tasks keep their existing local attribution.
-    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',['build','oauth','claude'].includes(settings.provider)?settings.provider:'api',canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
+    if(post&&settings&&settings.task!=='comments')return JSON.stringify(['post-input-v4-source-full-url',Providers.resolve(settings.provider).id,canonicalPostUrl(post.url),resolvePostLanguage(settings.language,post)]);
     return post ? JSON.stringify([nativePostIdentity(post),
       (Array.isArray(post.quotedContext) ? post.quotedContext : []).map(nativePostIdentity)]) : '';
   }
@@ -1191,5 +1227,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, officialOAuthURL, oauthErrorKey, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, CLICK_ONLY_TRIGGERS, clickOnlyTriggers, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, providers: Providers, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_AUTO, CLAUDE_BASE_MODEL, CLAUDE_HARD_MODEL, CLAUDE_TRIAGE_MODEL, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, officialOAuthURL, oauthErrorKey, providerErrorKey, isUsageIssue, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, CACHE_RETENTIONS, cacheRetention, DEFAULT_CUSTOM_TRIGGERS, CLICK_ONLY_TRIGGERS, clickOnlyTriggers, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, automaticTrigger, triagePrefilter, triageApplies, TRIAGE_CHECKABLE, TRIAGE_KINDS, TRIAGE_DIFFICULTY, TRIAGE_SIGNALS, TRIAGE_SKIP_KINDS, TRIAGE_ROUTES, sanitizeTriage, triageSkipKind, triageRoute, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, LAYOUT_HEALTH, LAYOUT_CODES, LAYOUT_ROUTES, ISSUES_URL, layoutFailure, layoutHealthStep, layoutReport, layoutIssueURL, visibilityEligibility, BoundedPostQueue });
 });

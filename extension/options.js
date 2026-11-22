@@ -203,7 +203,7 @@
   }
   function renderProvider() {
     const build = isBuild(),oauth=isOAuth();
-    $("api-fields").hidden = !isAPI();$("build-fields").hidden = !build;$("oauth-fields").hidden=!oauth;$("claude-fields").hidden=!isClaude();
+    for (const descriptor of core.providers.list) $(descriptor.panelId).hidden = descriptor.id !== $("provider").value;
     for (const id of claudeControlIds) $(id).disabled = busy || !isClaude();
     for (const id of apiControlIds) $(id).disabled = busy || !isAPI();
     for (const id of buildControlIds) $(id).disabled = busy || !build;
@@ -723,8 +723,7 @@
     if (busy) return;
     const triggerMode=formTriggerMode(),enabled=triggerMode!=="paused",provider=$("provider").value;
     const triggerChanged=triggerPreferencesChanged();
-    const modelId=isClaude()?"claude-model":isOAuth()?"oauth-model":isBuild()?"build-model":"api-model",effortId=isClaude()?"claude-effort":isOAuth()?"oauth-reasoning-effort":isBuild()?"build-reasoning-effort":"api-reasoning-effort";
-    const modelField=isClaude()?"claudeModel":isOAuth()?"oauthModel":isBuild()?"buildModel":"apiModel",effortField=isClaude()?"claudeEffort":isOAuth()?"oauthReasoningEffort":isBuild()?"buildReasoningEffort":"apiReasoningEffort";
+    const {controls,fields}=core.providers.resolve(provider),modelId=controls.model,effortId=controls.effort,modelField=fields.model,effortField=fields.effort;
     const connectionChanged=isClaude()?claudeKeyChanged:isAPI()?keyNeedsSave():isBuild()&&(buildSecretChanged||Number($("build-port").value)!==buildConnection.port);
     const strict=enabled&&(provider!==currentSettings.provider||$(modelId).value!==currentSettings[modelField]||$(effortId).value!==currentSettings[effortField]||$("web-search").checked!==currentSettings.webSearch||$("x-search").checked!==currentSettings.xSearch||connectionChanged);
     // A stale catalog or unfinished connection must not prevent pausing or

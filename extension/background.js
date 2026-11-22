@@ -1,6 +1,6 @@
 /* SuperX: credentials and provider calls stay in the extension worker. */
-importScripts('feed-core.js', 'claude-transport.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
-const Core = XGrokCore;
+importScripts('provider-registry.js', 'feed-core.js', 'claude-transport.js', 'api-provider.js', 'build-acp.js', 'build-transport.js', 'build-provider.js', 'build-setup.js', 'ui-i18n.js', 'key-store.js', 'oauth-provider.js', 'history-store.js');
+const Core = XGrokCore, Providers = Core.providers;
 const UI = GrokFirstUI;
 const KeyStore = SuperXKeyStore;
 const BuildKeyStore = SuperXBuildConnectionStore;
@@ -63,7 +63,7 @@ async function initialize() {
   const legacyConnection=KeyStore.envelopePresent(local.apiKeyEncrypted)||validKey(local.apiKey)||local.apiKeyVault!==undefined||validKey(session.apiKey)||BuildKeyStore.envelopePresent(local.buildConnectionEncrypted);
   settings = Core.normalizeSettings(!hasSettings&&legacyConnection?{provider:'api'}:local.settings);
   startupProfile={settings:Boolean(hasSettings),credential:legacyConnection||ClaudeKeyStore.envelopePresent(local.claudeApiKeyEncrypted)};
-  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!['api','build','oauth','claude','native'].includes(local.settings.provider));
+  providerFault=local.invalidAnswerSource===true||Boolean(local.settings?.provider&&!Providers.has(local.settings.provider)&&!Providers.isRetired(local.settings.provider));
   if(providerFault)await chrome.storage.local.set({invalidAnswerSource:true});
   // OAuth restoration cannot delay an independent API Key or local connection.
   // Its own gate stays closed until restoration has established usable state.
@@ -125,8 +125,8 @@ async function initialize() {
   // Saved answers can outlive a Grok login that was not remembered. Once the
   // login is restored, answers for any other account leave disk as well.
   void oauthReady.then(()=>{
-    const identity=oauth.status().credentialId||'',stale=partition=>partition[1]==='oauth'&&partition[2]?.[0]!==identity;
-    if(Object.keys(cache).some(key=>stale(cachePartition(key))))return purgeCacheEntries(stale);
+    const identity=oauth.status().credentialId||'',current=cached=>cached?.[0]===identity;
+    if(Object.keys(cache).some(key=>{const partition=cachePartition(key);return partition[1]==='oauth'&&!current(partition[2]);}))return dropProviderCache('oauth',current);
   }).catch(()=>{});
   await guideReady;
 }
@@ -158,7 +158,7 @@ function persistCacheStats(){
 function recordCacheReuse(entry,provider){
   const usage=entry.usage||{};
   const tokens=Number.isFinite(usage.total_tokens)?usage.total_tokens:(Number(usage.input_tokens)||0)+(Number(usage.output_tokens)||0);
-  const usd=['api','claude'].includes(provider)?SuperXClaude.ticksToUSD(usage.cost_in_usd_ticks):0;
+  const usd=Providers.get(provider)?.billing==='metered'?SuperXClaude.ticksToUSD(usage.cost_in_usd_ticks):0;
   cacheStats={since:cacheStats.since||Date.now(),hits:cacheStats.hits+1,tokens:cacheStats.tokens+Math.max(0,Math.trunc(tokens)),usd:cacheStats.usd+usd};
   void persistCacheStats().catch(()=>{});
 }
@@ -194,7 +194,7 @@ function onOAuthChanged(){
   if(identity!==oauthCredentialIdentity){
     oauthCredentialIdentity=identity;oauthGeneration++;
     for(const job of [...jobs.values()].filter(value=>value.settings.provider==='oauth'))abortJob(job);
-    void purgeCacheEntries(partition=>partition[1]==='oauth'&&(!identity||partition[2]?.[0]!==identity)).catch(()=>{});
+    void dropProviderCache('oauth',cached=>Boolean(identity)&&cached?.[0]===identity).catch(()=>{});
     if(settings?.provider==='oauth')void history.invalidateResults?.().catch(()=>{});
   }
   // Device codes and the official authorization URL go only to extension UI.
@@ -204,8 +204,6 @@ function onOAuthChanged(){
     await broadcastConfig();pump();
   }).catch(()=>{});
 }
-function selectedModel(value){return Core.providerModel?Core.providerModel(value):value.provider==='oauth'?value.oauthModel:value.provider==='build'?value.buildModel:value.apiModel;}
-function selectedEffort(value){return Core.providerEffort?Core.providerEffort(value):value.provider==='oauth'?value.oauthReasoningEffort:value.provider==='build'?value.buildReasoningEffort:Core.reasoningEffort(value.apiModel,value.apiReasoningEffort);}
 function historyScope(value=settings){return value.provider==='oauth'?'oauth:'+(value.oauthCredentialId||oauth.status().credentialId||'signed-out'):value.provider;}
 function scopedHistory(result){
   const scope=historyScope();
@@ -265,7 +263,7 @@ function queueBuildConnection(message,clear=false){
         buildSecret=connection.secret;
         await saveSettings(next?mergeTriggerPreferences(next,message.triggerPreferencesChanged===false):{...settings,buildPort:connection.port});
       }
-      await purgeCacheEntries(partition=>partition[1]==='build');
+      await dropProviderCache('build');
     }catch{failure=buildStorageError();buildSecret='';}
     finally{buildConnectionPending--;}
     if(generation===buildConnectionGeneration){buildStatusAt=0;buildStatus={connected:false,installed:false,available:false,errorCode:'BUILD_CONNECTION_REQUIRED'};}
@@ -551,9 +549,9 @@ function sanitizeDraft(raw) {
 function cacheKey(post, s, inputFingerprint) {
   const mode=Core.explanationMode(s);
   const prompts=['fact-check-prompts-v2-deeper',mode==='preset'?Core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
-  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v2',s.claudeModel,s.claudeMaxSearches,Core.claudeContextKey(post)]:s.apiModel,s.language,s.webSearch,s.xSearch,
+  return JSON.stringify(['GrokFirst-v1',s.provider,Providers.resolve(s.provider).cacheIdentity(s,{task:'analysis',postContext:Core.claudeContextKey(post)}),s.language,s.webSearch,s.xSearch,
     'api-v11-context-images',mode,'only',
-    Core.apiPostIdentity(post,s),...prompts,selectedEffort(s)]);
+    Core.apiPostIdentity(post,s),...prompts,Core.providerEffort(s)]);
 }
 function sanitizeAnalysis(raw) {
   const value=typeof raw==='string'?{text:raw}:raw&&typeof raw==='object'?raw:{};
@@ -569,13 +567,14 @@ function verdictMetadata(value) {
 }
 function commentCacheKey(post,s,inputFingerprint,analysis) {
   const prompts=['comments-prompt-v1',s.commentsPrompt];
-  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v1',s.claudeModel,s.claudeMaxSearches]:s.apiModel,s.language,Core.postFingerprint(post),analysis,...prompts,selectedEffort(s)]);
+  return JSON.stringify(['GrokFirst-comments-v2-language',s.provider,Providers.resolve(s.provider).cacheIdentity(s,{task:'comments'}),s.language,Core.postFingerprint(post),analysis,...prompts,Core.providerEffort(s)]);
 }
 function commentsJob(job) { return job.settings.task==='comments'; }
 function draftJob(job) { return job.settings.task==='draft'; }
-function billingMetadata(value,provider) { return ['api','build','oauth','claude'].includes(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
+function billingMetadata(value,provider) { return Providers.has(provider)?GrokFirstAPI.sanitizedMetadata(value):{}; }
+function remoteProvider(provider) { return Providers.get(provider)?.caps.remote===true; }
 function requestMetadata(value,provider) {
-  if(!['api','oauth','claude'].includes(provider))return {};
+  if(!remoteProvider(provider))return {};
   let diagnostics;
   try{diagnostics=(Core.sanitizedRequestDiagnostics||GrokFirstAPI.sanitizedRequestDiagnostics)?.(value?.requestDiagnostics);}catch{/* Invalid diagnostic data is never forwarded. */}
   return diagnostics?{requestDiagnostics:diagnostics}:{};
@@ -602,7 +601,7 @@ function rememberAPIDiagnostics(job,value,code) {
   // Unpublished draft tasks never write provider diagnostics to storage. Even
   // a nominally redacted upstream error may echo a fragment of private input.
   if(draftJob(job))return;
-  if(!['api','oauth'].includes(job.settings.provider)||job.diagnosticsRecorded||!API_DIAGNOSTIC_CODES.has(code))return;
+  if(Providers.get(job.settings.provider)?.caps.persistDiagnostics!==true||job.diagnosticsRecorded||!API_DIAGNOSTIC_CODES.has(code))return;
   const diagnostics=requestMetadata(value,'api').requestDiagnostics;
   if(!diagnostics)return;
   job.diagnosticsRecorded=true;
@@ -674,6 +673,9 @@ function purgeCacheEntries(predicate) {
   // Storage is written once startup has restored it, never over it.
   const epoch=++cacheEpoch;return Promise.resolve().then(()=>ready).then(()=>persistCache(epoch));
 }
+// Drops one connection's answers. `keep` sees each entry's cache identity
+// (the registry's cacheIdentity) and may spare answers that are still valid.
+function dropProviderCache(id,keep=()=>false) { return purgeCacheEntries(partition=>partition[1]===id&&!keep(partition[2])); }
 function removeStoredCache(area) { return area==='local'?chrome.storage.local.remove(LOCAL_CACHE_KEY):chrome.storage.session.remove('cache'); }
 // Answers live in the area the current retention names. A copy left in the
 // other area by a retention change joins them once and is then removed.
@@ -789,7 +791,7 @@ function waitForAbort(promise, signal) {
 async function openSettings(focus,setupEntry=false) {
   // Replace stale focus requests even when the caller uses a generic Settings
   // entry point or sends an unlock target from an older content script.
-  try { await chrome.storage.session.set({superxOptionsFocus:{id:focus==='oauth'||settings.provider==='oauth'?'oauth':focus==='build'||settings.provider==='build'?'build':focus==='claude'||settings.provider==='claude'?'claude':'api-key',nonce:crypto.randomUUID()}}); }
+  try { await chrome.storage.session.set({superxOptionsFocus:{id:Providers.settingsFocus(focus,settings.provider),nonce:crypto.randomUUID()}}); }
   catch { /* The settings page remains reachable when session storage fails. */ }
   // Until the first setup is finished or skipped, the rail and popup "set me
   // up" entry points lead to the short guide instead of the full page.
@@ -959,7 +961,7 @@ chrome.runtime.onConnect.addListener(port => {
 function liveJob(job) {
   return runningJobs.has(job) && jobs.get(job.key)===job && !job.controller.signal.aborted && job.revision===revision && job.clientEpoch===job.client.cancelEpoch && clients.has(job.client);
 }
-function apiLimit(s) { return s.provider==='build'?1:Math.max(1,Math.min(8,Math.trunc(Number(s.apiConcurrency))||3)); }
+function apiLimit(s) { return Providers.get(s.provider)?.maxConcurrency??Math.max(1,Math.min(8,Math.trunc(Number(s.apiConcurrency))||3)); }
 const API_BUDGET_CODES=new Set(['spending_limit','insufficient_credits','insufficient_quota','usage_limit_exceeded']);
 function apiBudgetFailure(value) {
   const supplied=GrokFirstAPI.sanitizedVerificationFailure(value?.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure(value?.partialResult?.verificationFailure);
@@ -1113,7 +1115,7 @@ async function executeJob(job) {
       send(client.port,{type:'TRIAGE_SKIP',requestId,triage:triageView(result.triageSkip),...aggregateBilling(job,job.billing)});return;
     }
 
-    if(['api','oauth','claude'].includes(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
+    if(remoteProvider(job.settings.provider)&&apiCapacityFailure(result))throw Object.assign(new Error('Model capacity is temporarily unavailable.'),{code:'API_CAPACITY',partialResult:result,verificationFailure:result.verificationFailure,...job.billing,...requestMetadata(result,job.settings.provider)});
     if(commentsJob(job))result.comments=GrokFirstAPI.validateComments(result.comments);
     else {
       const reader=Core.readerOutput(result.text,{final:true});
@@ -1163,8 +1165,8 @@ async function executeJob(job) {
       const partialResult=partialText?withBillingMetadata({...retained,...errorBilling,...diagnosticMetadata,text:partialText,verificationStatus:'incomplete'},job.settings.provider,job.settings.apiVerification):undefined;
       if(partialResult&&!commentsJob(job))job.retainedFactCheck=sanitizeAnalysis(partialResult);
       const safeError=e.code==='MODEL_UNSUPPORTED'?GrokFirstAPI.publicError(e):job.settings.provider==='build'?SuperXBuild.publicError(e):GrokFirstAPI.publicError(e);
-      const budgetFailure=['api','oauth','claude'].includes(job.settings.provider)?apiBudgetFailure(e):undefined;
-      const capacityFailure=['api','oauth','claude'].includes(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
+      const budgetFailure=remoteProvider(job.settings.provider)?apiBudgetFailure(e):undefined;
+      const capacityFailure=remoteProvider(job.settings.provider)&&apiCapacityFailure(e)?GrokFirstAPI.sanitizedVerificationFailure(e.verificationFailure)||GrokFirstAPI.sanitizedVerificationFailure({stage:'verify',code:'SERVER',...e.failureDetails,errorCode:'API_CAPACITY'}):undefined;
       if(partialResult&&!draftJob(job))rememberHistoryResult(job.historyTicket,{...partialResult,completedAt:Date.now()},false,job.historyLanguage);
       rememberAPIDiagnostics(job,{...diagnosticMetadata,verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},safeError.code);
       const failureMetadata={...errorBilling,...diagnosticMetadata,...(commentsJob(job)?(budgetFailure||capacityFailure?{verificationFailure:budgetFailure||capacityFailure}:{}):{...verificationMetadata({verificationFailure:e.verificationFailure||partialResult?.verificationFailure||budgetFailure||capacityFailure},job.settings.apiVerification),partialResult})};
@@ -1420,7 +1422,7 @@ async function saveClaudeKey(message){
     if(raw){const envelope=await ClaudeKeyStore.seal(raw);await chrome.storage.local.set({claudeApiKeyEncrypted:envelope});claudeKey=raw;}
     else{claudeKey='';await chrome.storage.local.remove('claudeApiKeyEncrypted');await ClaudeKeyStore.clear();}
   }catch{return {ok:false,errorKey:'claude.keyStorageError'};}
-  void purgeCacheEntries(partition=>partition[1]==='claude').catch(()=>{});
+  void dropProviderCache('claude').catch(()=>{});
   if(message.settings!==undefined)await saveSettings(mergeTriggerPreferences(Core.normalizeSettings(message.settings),message.triggerPreferencesChanged===false));
   else await broadcastConfig();
   pump();
@@ -1441,7 +1443,7 @@ async function handleOAuthMessage(message,actionGeneration){
   }else if(message.type==='OAUTH_CANCEL_LOGIN')state=await oauth.cancelLogin();
   else if(message.type==='OAUTH_LOGOUT'){
     state=await oauth.logout();
-    await purgeCacheEntries(partition=>partition[1]==='oauth').catch(()=>{});
+    await dropProviderCache('oauth').catch(()=>{});
   }else if(message.type==='OAUTH_SET_REMEMBER')state=await oauth.setRemember(message.remember);
   else if(message.type==='OAUTH_REFRESH_CATALOG')state=await oauth.catalog();
   if(state&&['OAUTH_LOGIN','OAUTH_START_LOGIN','OAUTH_SET_REMEMBER'].includes(message.type)&&typeof state.remember==='boolean'){
@@ -1466,7 +1468,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     const raw=message.apiKey,apiKey=typeof raw==='string'?raw.trim():raw==null?'':null;
     if(apiKey===null||typeof raw==='string'&&(/[\r\n]/.test(raw)||raw.trim()&&!validKey(raw))) {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
     if(message.remember!==undefined&&typeof message.remember!=='boolean') {respond({ok:false,errorKey:'errors.keyInvalid'});return true;}
-    if(message.settings?.provider!==undefined&&!['api','oauth','build','claude'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!Providers.has(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=message.settings===undefined?undefined:Core.normalizeSettings(message.settings);
     if(next&&!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     queueSecurityMutation({apiKey,remember:message.remember,settings:next,triggerPreferencesChanged:message.triggerPreferencesChanged})
@@ -1493,7 +1495,7 @@ chrome.runtime.onMessage.addListener((message,sender,respond)=>{
     return true;
   }
   if(trustedUI(sender) && message?.type==='SAVE_SETTINGS') {
-    if(message.settings?.provider!==undefined&&!['api','oauth','build','claude'].includes(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
+    if(message.settings?.provider!==undefined&&!Providers.has(message.settings.provider)){respond({ok:false,errorKey:'options.providerChoice'});return true;}
     const next=Core.normalizeSettings(message.settings);
     if(!next.webSearch&&!next.xSearch) {respond({ok:false,errorKey:'options.urlSearchRequired'});return true;}
     // Join the credential chain at receipt so even same-tick saves apply in the

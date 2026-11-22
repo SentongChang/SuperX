@@ -255,12 +255,19 @@ test('output cannot contaminate production extension files', async t => {
   await assert.rejects(packageExtension({ root, outputDir: join(root, 'extension', 'build') }), /outside the extension/);
 });
 
-test('source-quality.js ships and loads after x-dom.js and before feed-core.js wherever feed-core reads it',async()=>{
-  const {PRODUCTION_FILES}=await packager;assert.ok(PRODUCTION_FILES.includes('source-quality.js'));
+// feed-core reads both modules when it loads. In node it requires them, so
+// only these lists can catch a page that forgot one.
+test('provider-registry.js and source-quality.js ship and load in one order wherever feed-core loads',async()=>{
+  const {PRODUCTION_FILES}=await packager;
+  for(const file of ['provider-registry.js','source-quality.js'])assert.ok(PRODUCTION_FILES.includes(file),file);
   const manifest=JSON.parse(await readFile(join(sourceRoot,'extension','manifest.json'),'utf8'));
-  const scripts=manifest.content_scripts[0].js;
-  assert.deepEqual(scripts.slice(0,3),['x-dom.js','source-quality.js','feed-core.js']);
-  const page=await readFile(join(sourceRoot,'extension','history.html'),'utf8');
-  const order=[...page.matchAll(/<script src="([^"]+)"/g)].map(match=>match[1]);
-  assert.ok(order.indexOf('source-quality.js')>=0&&order.indexOf('source-quality.js')<order.indexOf('feed-core.js'),order.join(','));
+  assert.deepEqual(manifest.content_scripts[0].js.slice(0,4),['x-dom.js','provider-registry.js','source-quality.js','feed-core.js']);
+  const worker=await readFile(join(sourceRoot,'extension','background.js'),'utf8');
+  assert.deepEqual(worker.match(/importScripts\(([^)]*)\)/)[1].match(/'[^']+'/g).slice(0,2),["'provider-registry.js'","'feed-core.js'"]);
+  for(const page of ['history.html','options.html','popup.html','setup.html','onboarding.html']){
+    const order=[...(await readFile(join(sourceRoot,'extension',page),'utf8')).matchAll(/<script src="([^"]+)"/g)].map(match=>match[1]);
+    const core=order.indexOf('feed-core.js');
+    assert.equal(order[core-1]==='source-quality.js'?order[core-2]:order[core-1],'provider-registry.js',page+': '+order.join(','));
+    if(order.includes('source-quality.js'))assert.equal(order[core-1],'source-quality.js',page);
+  }
 });

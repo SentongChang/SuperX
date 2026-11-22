@@ -12,7 +12,7 @@ const output=path.join(root,'artifacts','usage-errors-preview');
 const require=createRequire(import.meta.url);
 let playwright;
 try{playwright=require('playwright');}catch{playwright=await import(pathToFileURL(process.env.SUPERX_PLAYWRIGHT_MODULE||path.join(os.homedir(),'.cache','codex-runtimes','codex-primary-runtime','dependencies','node','node_modules','playwright','index.mjs')));}
-const scripts=['x-dom.js','source-quality.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js','content.js'];
+const scripts=['x-dom.js','provider-registry.js','source-quality.js','feed-core.js','ui-i18n.js','overlay-layout.js','marked.umd.js','markdown-renderer.js','draft-composer.js','content.js'];
 const sources=Object.fromEntries(await Promise.all(scripts.map(async name=>[name,await readFile(path.join(root,'extension',name),'utf8')])));
 const usageURL='https://grok.com/dashboard/usage',consoleURL='https://console.x.ai/';
 const report={environment:'Fresh isolated browser; synthetic pages and replies; no provider requests or publishing',checks:[],pageErrors:[],externalRequests:[],billingNavigations:[],screenshots:[]};
