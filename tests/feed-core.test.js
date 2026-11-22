@@ -604,6 +604,78 @@ test('inline links in post text are not treated as quoted containers', () => {
   assert.deepEqual(result.quotedContext, []);
 });
 
+test('the checked post lists its own outbound links, never mentions, hashtags or cashtags', () => {
+  const link = (href, text) => e('a', { href }, [], text);
+  const text = e('div', { 'data-testid': 'tweetText' }, [
+    link('/someone', '@someone'), link('/hashtag/claims', '#claims'), link('/search?q=%24TSLA&src=cashtag_click', '$TSLA'),
+    link('https://t.co/AAA', 'https://example.com/a/b…'), link('https://t.co/BBB', 'example.org/report…'),
+    link('https://t.co/CCC', 'https://example.com/a/b'), link('https://t.co/DDD', 'https://news.example/1#top'),
+    link('/other/status/55', 'x.com/other/status/55'), link('https://t.co/EEE', 'https://fifth.example/')
+  ], 'Claim ');
+  const result = core.extractPost(e('article', {}, [header('author', '10'), text]));
+  // Expanded text wins when it parses; otherwise the t.co address is kept.
+  // Duplicates collapse, fragments are dropped and at most four are listed.
+  assert.deepEqual(result.links, [{ url: 'https://example.com/a/b' }, { url: 'https://t.co/BBB' }, { url: 'https://news.example/1' },
+    { url: 'https://x.com/other/status/55' }]);
+  assert.deepEqual(core.fetchableLinks(result), ['https://example.com/a/b', 'https://t.co/BBB', 'https://news.example/1']);
+  assert.equal(Object.hasOwn(core.extractPost(e('article', {}, [header('author', '11'), tweetText('No links.')])), 'links'), false);
+});
+
+test('a link card becomes a titled link, not a quoted post, and a real quote still does', () => {
+  const card = e('div', { 'data-testid': 'card.wrapper' }, [e('a', { href: 'https://t.co/CARD' }, [
+    e('span', {}, [], 'example.com'), e('span', {}, [], 'Official report'), e('span', {}, [], 'Figures for 2026'), e('span', {}, [], 'More')])]);
+  const body = e('div', { 'data-testid': 'tweetText' }, [e('a', { href: 'https://t.co/CARD' }, [], 'https://example.com/report…')], 'See ');
+  const quote = e('div', { 'data-testid': 'quoteTweet' }, [header('quoted', '21'), tweetText('Quoted claim.'),
+    e('div', { 'data-testid': 'card.wrapper' }, [e('a', { href: 'https://t.co/INNER' }, [], 'inner.example')])]);
+  const result = core.extractPost(e('article', {}, [header('author', '20'), body, card, quote]));
+  assert.deepEqual(result.links, [{ url: 'https://example.com/report', title: 'example.com · Official report · Figures for 2026' }]);
+  assert.deepEqual(result.quotedContext.map(item => item.id), ['21']);
+});
+
+test('only a visible Community Note on the checked post itself is captured', () => {
+  const note = (attrs = {}) => e('div', { 'data-testid': 'birdwatch-pivot', ...attrs }, [
+    e('span', {}, [], 'Readers added context: the figure is from 2019. ' + 'x'.repeat(1600)),
+    e('a', { href: 'https://t.co/N1' }, [], 'https://stats.example/2019…'), e('a', { href: '/i/birdwatch/n/1' }, [], 'Rate it'),
+    e('a', { href: 'https://t.co/N2' }, [], 'second.example'), e('a', { href: 'https://t.co/N3' }, [], 'third.example')]);
+  const own = core.extractPost(e('article', {}, [header('author', '30'), tweetText('Claim.'), note()]));
+  assert.equal(own.communityNote.text.length, 1500); assert.match(own.communityNote.text, /^Readers added context/);
+  assert.deepEqual(own.communityNote.links, [{ url: 'https://stats.example/2019' }, { url: 'https://t.co/N2' }]);
+  const hidden = core.extractPost(e('article', {}, [header('author', '31'), tweetText('Claim.'), note({ style: 'display: none' })]));
+  assert.equal(Object.hasOwn(hidden, 'communityNote'), false);
+  const quoted = core.extractPost(e('article', {}, [header('author', '32'), tweetText('Claim.'),
+    e('div', { 'data-testid': 'quoteTweet' }, [header('quoted', '33'), tweetText('Quoted.'), note()])]));
+  assert.equal(Object.hasOwn(quoted, 'communityNote'), false);
+});
+
+test('link URLs must be absolute web addresses without credentials, ports or fragments', () => {
+  assert.equal(core.linkURL('https://example.com/a?b=1#frag'), 'https://example.com/a?b=1');
+  for (const value of ['javascript:alert(1)', 'data:text/html,hi', 'https://user:pass@example.com/', 'https://example.com:8443/',
+    'ftp://example.com/', '/relative', 'https://localhost/', 'https://example.com/' + 'a'.repeat(2048), 42, null])
+    assert.equal(core.linkURL(value), null, String(value).slice(0, 40));
+});
+
+test('the links gap needs a reported fetch with nothing opened and a post with links Claude may open', () => {
+  const settings = { provider: 'claude' }, post = { links: [{ url: 'https://example.com/a' }], images: [] };
+  const gaps = (value, webFetch, verdict = 'mixed') => core.checkGaps({ post: value, settings, searched: true, webFetch, verdict });
+  assert.deepEqual(gaps(post, { attempted: 2, succeeded: 0 }), ['links']);
+  assert.deepEqual(gaps(post, { attempted: 0, succeeded: 0 }), ['links']);
+  assert.deepEqual(gaps(post, { attempted: 2, succeeded: 1 }), []);
+  assert.deepEqual(gaps(post, undefined), [], 'Connections that read X themselves report no fetch');
+  assert.deepEqual(gaps(post, { attempted: 0, succeeded: 0 }, 'none'), []);
+  assert.deepEqual(gaps({ links: [{ url: 'https://x.com/a/status/1' }], images: [] }, { attempted: 0, succeeded: 0 }), []);
+  assert.deepEqual(gaps({ images: [], communityNote: { text: 'Note.', links: [{ url: 'https://stats.example/' }] } }, { attempted: 0, succeeded: 0 }), ['links']);
+  // Only the extension observes links, so the model's marker never lists it.
+  assert.equal(core.formatVerdictLine('mixed', ['links', 'text']), 'VERDICT: MIXED; LIMITS: TEXT');
+});
+
+test('the Claude context key changes with links, a Community Note or truncation', () => {
+  const post = { id: '1', url: 'https://x.com/a/status/1' };
+  const keys = [post, { ...post, links: [{ url: 'https://example.com/' }] }, { ...post, communityNote: { text: 'Context.', links: [] } },
+    { ...post, textTruncated: true }].map(core.claudeContextKey);
+  assert.equal(new Set(keys).size, 4);
+  assert.equal(core.claudeContextKey({ ...post, links: [{ url: 'https://example.com/', title: 'Changed title' }] }), keys[1]);
+});
+
 test('fingerprints change for edited text, media, or quoted evidence', () => {
   const post = { id: '1', text: 'Initial', images: [], quotedContext: [] };
   const initial = core.postFingerprint(post);

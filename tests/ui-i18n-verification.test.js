@@ -367,3 +367,12 @@ test('source-quality labels exist in every language with the {list} placeholder 
   for(const key of keys)assert.doesNotMatch(ui.catalog.en[key],/verif/i,key);
   assert.equal(ui.t('source.summary','fr',{list:'Presse 1'}),'Sources : Presse 1');assert.equal(ui.t('source.social','zh-CN'),'社交媒体');
 });
+
+test('the Claude X-context line replaces the old search note in every language without "verify" wording',()=>{
+  for(const language of ui.SUPPORTED_LANGUAGES){
+    const value=ui.catalog[language]['options.claude.xContext'];assert.ok(value?.trim(),language);
+    if(language!=='en')assert.notEqual(value,ui.catalog.en['options.claude.xContext'],language);
+    assert.equal(Object.hasOwn(ui.catalog[language],'claude.searchNote'),false,language);
+  }
+  assert.doesNotMatch(ui.catalog.en['options.claude.xContext'],/verif/i);assert.match(ui.t('options.claude.xContext','zh-CN'),/社区笔记/);
+});

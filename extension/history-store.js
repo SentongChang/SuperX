@@ -11,7 +11,7 @@
   // Copies of XGrokCore.VERDICTS and CHECK_GAPS: the worker loads this store
   // without depending on Core, and a test keeps the lists identical.
   const VERDICTS=Object.freeze(['accurate','inaccurate','mixed','unproven','none']);
-  const CHECK_GAPS=Object.freeze(['text','media','video','search']);
+  const CHECK_GAPS=Object.freeze(['text','media','video','links','search']);
   const copy=value=>JSON.parse(JSON.stringify(value));
   const text=(value,limit)=>typeof value==='string'?value.slice(0,limit):'';
   function safeUrl(value){

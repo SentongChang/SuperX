@@ -17,6 +17,8 @@
   const MAX_TOKENS = Object.freeze({verify: 16000, comments: 4000});
   const MAX_CONTINUATIONS = 2;
   const COMMENTS_SCHEMA = Object.freeze({type: 'object', properties: {comments: {type: 'array', items: {type: 'string'}}}, required: ['comments'], additionalProperties: false});
+  // Opened pages are capped so the post's links cannot run up the bill.
+  const WEB_FETCH = Object.freeze({maxUses: 2, maxContentTokens: 6000, blockedDomains: Object.freeze(['x.com', 'twitter.com'])});
   const SEARCH_GUIDANCE = 'Your training data ends well before today\'s date. Records, office holders, prices, versions, rules and anything "latest" may have changed since then, so search for those before you answer, even when you feel sure. Facts that can\'t change need no search.';
 
   function profile(model) {
@@ -56,7 +58,8 @@
     return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
   }
   // `request` is the Responses-shaped request from GrokFirstAPI.buildRequest.
-  function messagesRequest(request, settings, {stage = 'verify', now = Date.now()} = {}) {
+  // `fetchable` counts the post's own links Claude may open with web_fetch.
+  function messagesRequest(request, settings, {stage = 'verify', now = Date.now(), fetchable = 0} = {}) {
     const model = profile(settings?.claudeModel);
     const comments = stage === 'comments';
     const body = {
@@ -76,6 +79,9 @@
     if (!comments && wantsSearch(request?.tools)) {
       const maxUses = Math.min(10, Math.max(1, Math.trunc(Number(settings?.claudeMaxSearches)) || Core.DEFAULT_SETTINGS.claudeMaxSearches));
       body.tools = [{type: model.webSearchTool, name: 'web_search', max_uses: maxUses}];
+      // Fixed order, search then fetch, so each tool shape keeps one cache prefix.
+      if (fetchable > 0) body.tools.push({type: model.webFetchTool, name: 'web_fetch', max_uses: Math.min(WEB_FETCH.maxUses, fetchable),
+        max_content_tokens: WEB_FETCH.maxContentTokens, citations: {enabled: true}, blocked_domains: [...WEB_FETCH.blockedDomains]});
     }
     if (comments) body.output_config.format = {type: 'json_schema', schema: COMMENTS_SCHEMA};
     // Server-side refusal fallback is offered on Sonnet/Opus; Haiku has none.
@@ -183,12 +189,19 @@
     // the reader-facing answer is the text after the final tool result.
     function finalBlocks() { return blocks.filter((block, index) => block && index > lastTool && block.type === 'text'); }
     function text() { return finalBlocks().map(block => block.text || '').join(''); }
+    // Server tool errors arrive as result blocks, never as exceptions.
+    function fetchResults() { return blocks.filter(block => block?.type === 'web_fetch_tool_result'); }
+    function fetchSummary() {
+      const results = fetchResults();
+      return {attempted: results.length, succeeded: results.filter(block => block.content?.type === 'web_fetch_result').length};
+    }
+    // Cited pages first. A fetched page's citations may carry no URL, so every
+    // opened page is listed after them.
     function sources() {
       const found = new Map();
-      for (const block of finalBlocks()) for (const citation of block.citations || []) {
-        const url = safeUrl(citation?.url);
-        if (url && !found.has(url)) found.set(url, {url, title: String(citation.title || url).slice(0, 200)});
-      }
+      const add = (value, title) => { const url = safeUrl(value); if (url && !found.has(url)) found.set(url, {url, title: String(title || url).slice(0, 200)}); };
+      for (const block of finalBlocks()) for (const citation of block.citations || []) add(citation?.url, citation?.title);
+      for (const block of fetchResults()) if (block.content?.type === 'web_fetch_result') add(block.content.url, block.content.content?.title);
       return [...found.values()].slice(0, 20);
     }
     function assistantContent() {
@@ -217,7 +230,7 @@
       return usages.length > 0 && usages.every(entry => Number.isFinite(entry.input_tokens) && Number.isFinite(entry.output_tokens)) && done;
     }
     return Object.freeze({begin, ingest, text, sources, assistantContent, rawUsage, usage: sharedUsage, usageComplete,
-      model: () => model, stopReason: () => stopReason, searched: () => searched, error: () => error, done: () => done});
+      model: () => model, stopReason: () => stopReason, searched: () => searched, fetchSummary, error: () => error, done: () => done});
   }
   function ticksToUSD(ticks) { return Number.isFinite(ticks) && ticks > 0 ? ticks / USD_TICKS : 0; }
 

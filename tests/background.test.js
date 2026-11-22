@@ -4167,7 +4167,9 @@ const GOLDEN_CACHE_IDENTITY={
   api:['grok-4.7','high'],
   oauth:[[OAUTH_ACCOUNT_A,'grok-4.7'],'low'],
   build:[['official-ws-v1',2419,'grok-4.7'],'high'],
-  claude:[['claude-messages-v1','claude-sonnet-5-5',5],'high']
+  // WP4 bumped the Claude analysis key once, to v2 plus the links, Community
+  // Note and truncation it reads. Comment keys keep the v1 identity.
+  claude:[['claude-messages-v2','claude-sonnet-5-5',5,'[[],"",false]'],'high',['claude-messages-v1','claude-sonnet-5-5',5]]
 };
 async function goldenProviderBackground(provider){
   const bg=createBackground({settings:{provider,language:'ja',...GOLDEN_PROVIDER_SETTINGS[provider]},oauthState:oauthConnected(),
@@ -4179,14 +4181,14 @@ async function goldenProviderBackground(provider){
 
 test('golden: analysis and comment cache keys per provider are byte-identical stored strings',async()=>{
   for(const provider of ['api','oauth','build','claude']){
-    const {bg,port}=await goldenProviderBackground(provider),[identity,effort]=GOLDEN_CACHE_IDENTITY[provider];
+    const {bg,port}=await goldenProviderBackground(provider),[identity,effort,commentIdentity=identity]=GOLDEN_CACHE_IDENTITY[provider];
     assert.equal((await analyze(bg,port,'golden-analysis-'+provider,100,{triggerKind:'manual'})).type,'RESULT',provider);
     assert.equal((await draftComments(bg,port,'golden-comments-'+provider,100,{analysis:{text:'Checked.'}})).type,'COMMENT_RESULT',provider);
     await until(()=>Object.keys(bg.session.data.cache||{}).length===2,provider+' cache write');
     const analysisKey=JSON.stringify(['GrokFirst-v1',provider,identity,'ja',true,true,'api-v11-context-images','preset','only',
       JSON.stringify(['post-input-v4-source-full-url',provider,'https://x.com/author/status/100','ja']),
       'fact-check-prompts-v2-deeper',core.DEFAULT_PROMPTS.verify,effort]);
-    const commentKey=JSON.stringify(['GrokFirst-comments-v2-language',provider,identity,'ja',
+    const commentKey=JSON.stringify(['GrokFirst-comments-v2-language',provider,commentIdentity,'ja',
       JSON.stringify([['100','Claim 100','','','',false,[]],[]]),
       {text:'Checked.',verificationStatus:'',warning:'',sources:[]},'comments-prompt-v1',core.DEFAULT_PROMPTS.comments,effort]);
     assert.deepEqual(Object.keys(bg.session.data.cache).sort(),[analysisKey,commentKey].sort(),provider);
@@ -4228,4 +4230,31 @@ test('analysis passed back to the worker keeps only a valid verdict and known ga
   assert.deepEqual(clone(bg.commentCalls[0].analysis), { text: 'Checked.', verificationStatus: '', warning: '', sources: [], gaps: ['text', 'search'] });
   await draftComments(bg, port, 'verdict-analysis-valid', 101, { analysis: { text: 'Checked.', verdict: 'none' } });
   assert.equal(bg.commentCalls[1].analysis.verdict, 'none'); assert.equal(Object.hasOwn(bg.commentCalls[1].analysis, 'gaps'), false);
+});
+
+test('a checked post keeps only well-formed links and a bounded Community Note, dropping bad entries silently', async () => {
+  const bg = createBackground(); await bg.ready(); const port = bg.connect();
+  const links = [{url:'javascript:alert(1)'},{url:'data:text/html,hi'},{url:'https://user:pw@example.com/'},{url:'https://example.com/'+'a'.repeat(2048)},
+    'not an object',{url:'https://ok.example/a#frag',title:'T'.repeat(400)},{url:'https://t.co/two'},{url:'https://three.example/'},{url:'https://four.example/'},{url:'https://five.example/'}];
+  const communityNote = {text:'N'.repeat(2000),links:[{url:'https://stats.example/'},{url:'ftp://stats.example/'},{url:'https://b.example/'},{url:'https://c.example/'}]};
+  const result = await analyze(bg, port, 'links-sanitized', 100, {post:{...post(100),links,communityNote}});
+  assert.equal(result.type, 'RESULT');
+  const sent = clone(bg.apiCalls[0].post);
+  assert.deepEqual(sent.links, [{url:'https://ok.example/a',title:'T'.repeat(300)},{url:'https://t.co/two'},{url:'https://three.example/'},{url:'https://four.example/'}]);
+  assert.equal(sent.communityNote.text.length, 1500); assert.deepEqual(sent.communityNote.links, [{url:'https://stats.example/'},{url:'https://b.example/'}]);
+  await analyze(bg, port, 'links-malformed', 101, {post:{...post(101),links:'oops',communityNote:{text:42}}});
+  assert.equal(Object.hasOwn(bg.apiCalls[1].post, 'links'), false); assert.equal(Object.hasOwn(bg.apiCalls[1].post, 'communityNote'), false);
+  // Comments draft from the visible post only.
+  await draftComments(bg, port, 'links-comments', 102, {post:{...post(102),links:[{url:'https://ok.example/'}]},analysis:{text:'Checked.'}});
+  assert.equal(Object.hasOwn(bg.commentCalls[0].post, 'links'), false);
+});
+
+test('a Claude answer is not reused once a Community Note appears, while Grok keys ignore it', async () => {
+  for (const provider of ['claude','api']) {
+    const {bg,port} = await goldenProviderBackground(provider);
+    assert.equal((await analyze(bg, port, provider+'-plain', 100, {triggerKind:'manual'})).cached === true, false);
+    const noted = await analyze(bg, port, provider+'-noted', 100, {triggerKind:'manual',post:{...post(100),communityNote:{text:'Readers added context.',links:[]}}});
+    assert.equal(noted.cached === true, provider !== 'claude', provider);
+    assert.equal((await analyze(bg, port, provider+'-noted-again', 100, {triggerKind:'manual',post:{...post(100),communityNote:{text:'Readers added context.',links:[]}}})).cached === true, true, provider);
+  }
 });

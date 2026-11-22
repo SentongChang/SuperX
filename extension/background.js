@@ -392,6 +392,19 @@ function sanitizePost(raw) {
   };
   return {...context(raw),id,url,quotedContext:(Array.isArray(raw.quotedContext)?raw.quotedContext:[]).slice(0,2).filter(quote=>quote&&typeof quote==='object'&&!Array.isArray(quote)).map(quote=>context(quote,1))};
 }
+// The checked post's own links and Community Note. Only a post being fact
+// checked carries them; history records, comments and drafts never do. One
+// malformed entry is dropped rather than failing the check.
+function sanitizeCheckedPost(raw) {
+  const post=sanitizePost(raw);
+  const links=list=>(Array.isArray(list)?list:[]).map(link=>{
+    const url=Core.linkURL(link?.url);
+    return url&&{url,...(typeof link.title==='string'&&link.title?{title:link.title.slice(0,300)}:{})};
+  }).filter(Boolean);
+  const own=links(raw.links).slice(0,4),note=raw.communityNote,noteText=typeof note?.text==='string'?note.text.trim().slice(0,1500):'';
+  return {...post,...(own.length?{links:own}:{}),
+    ...(noteText?{communityNote:{text:noteText,links:links(note.links).slice(0,2).map(({url})=>({url}))}}:{})};
+}
 function sanitizeDraftImages(raw) {
   if(raw===undefined)return [];
   if(!Array.isArray(raw)||raw.length>4)throw new Error('无法读取草稿图片。');
@@ -481,7 +494,7 @@ function sanitizeDraft(raw) {
 function cacheKey(post, s, inputFingerprint) {
   const mode=Core.explanationMode(s);
   const prompts=['fact-check-prompts-v2-deeper',mode==='preset'?Core.DEFAULT_PROMPTS.verify:s.verifyPrompt];
-  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v1',s.claudeModel,s.claudeMaxSearches]:s.apiModel,s.language,s.webSearch,s.xSearch,
+  return JSON.stringify(['GrokFirst-v1',s.provider,s.provider==='build'?['official-ws-v1',s.buildPort,s.buildModel]:s.provider==='oauth'?[s.oauthCredentialId,s.oauthModel]:s.provider==='claude'?['claude-messages-v2',s.claudeModel,s.claudeMaxSearches,Core.claudeContextKey(post)]:s.apiModel,s.language,s.webSearch,s.xSearch,
     'api-v11-context-images',mode,'only',
     Core.apiPostIdentity(post,s),...prompts,selectedEffort(s)]);
 }
@@ -668,7 +681,7 @@ chrome.runtime.onConnect.addListener(port => {
         const oauthState=settings.provider==='oauth'?oauth.status():null;
         if(oauthState&&!oauthState.credentialId){miss(['restoring','refreshing'].includes(oauthState.state));return;}
         let post;
-        try{post=sanitizePost(message.post);}catch{miss(false);return;}
+        try{post=sanitizeCheckedPost(message.post);}catch{miss(false);return;}
         const snapshot={...settings,...(oauthState?{oauthCredentialId:oauthState.credentialId}:{})};
         const result=cachedResult(cacheKey(post,snapshot,Core.postFingerprint(post)));
         if(!result){miss(false);return;}
@@ -729,7 +742,7 @@ chrome.runtime.onConnect.addListener(port => {
       if(!settings.enabled&&!comments&&!draft) { report('已暂停自动分析。','PAUSED'); return; }
       if(railStates[client.tabId]&&!draft){report('右栏已收起。','RAIL_COLLAPSED');return;}
       let post,inputFingerprint;
-      try { if(draft)post=sanitizeDraft(message.draft);else {inputFingerprint=Core.postFingerprint(message.post);post=sanitizePost(message.post);} } catch(e) { report(draft?'请输入有效的草稿和回复上下文。':e.message,draft?'DRAFT_INVALID':'POST_INVALID'); return; }
+      try { if(draft)post=sanitizeDraft(message.draft);else {inputFingerprint=Core.postFingerprint(message.post);post=comments?sanitizePost(message.post):sanitizeCheckedPost(message.post);} } catch(e) { report(draft?'请输入有效的草稿和回复上下文。':e.message,draft?'DRAFT_INVALID':'POST_INVALID'); return; }
       const triggerKind=message.triggerKind===undefined?(message.force===true?'recheck':'automatic'):message.triggerKind;
       let pageUrl=typeof message.pageUrl==='string'?message.pageUrl:client.pageUrl;
       const detailTrigger=triggerKind==='detail-main'||triggerKind==='detail-reply';

@@ -347,3 +347,14 @@ test('the checked modern post reports its own expander or clamp, never a clipped
   item.body.append(e('button', {type:'button', class:'max-w-full text-brand hover:underline'}, [], 'Show more'));
   assert.equal(DOM.mainTextTruncated(item.article), true); assert.equal(Core.extractPost(item.article).textTruncated, true);
 });
+
+test('a modern post keeps the full address X hides inside a shortened link label', () => {
+  const item = post('1');
+  item.body.append(e('a', {href:'https://t.co/abc'}, [e('span', {'aria-hidden':'true'}, [], 'https://'), e('span', {}, [], 'example.com/a/b'),
+    e('span', {'aria-hidden':'true'}, [], '/c?id=2'), e('span', {'aria-hidden':'true'}, [], '…')]));
+  item.article.append(e('div', {'data-testid':'birdwatch-pivot'}, [e('span', {}, [], 'Readers added context.')]));
+  documentWith(item.row);
+  const result = Core.extractPost(item.article);
+  assert.deepEqual(result.links, [{url:'https://example.com/a/b/c?id=2'}]);
+  assert.deepEqual(result.communityNote, {text:'Readers added context.', links:[]});
+});

@@ -35,9 +35,9 @@
   // official price list; they only drive the local budget estimate. The
   // Anthropic Console remains the authoritative usage and billing record.
   const CLAUDE_MODELS = Object.freeze([
-    {value:'claude-haiku-5-5',label:'Claude Haiku 5.5',input:0.10,output:0.50,cacheRead:0.01,longInput:0.50,longOutput:2.50,longCacheRead:0.05,longThreshold:100000,webSearchTool:'web_search_20250305',fallbacks:false},
-    {value:'claude-sonnet-5-5',label:'Claude Sonnet 5.5',input:2,output:10,cacheRead:0.10,webSearchTool:'web_search_20260209',fallbacks:true},
-    {value:'claude-opus-5-5',label:'Claude Opus 5.5',input:4,output:20,cacheRead:0.20,webSearchTool:'web_search_20260209',fallbacks:true}
+    {value:'claude-haiku-5-5',label:'Claude Haiku 5.5',input:0.10,output:0.50,cacheRead:0.01,longInput:0.50,longOutput:2.50,longCacheRead:0.05,longThreshold:100000,webSearchTool:'web_search_20250305',webFetchTool:'web_fetch_20250910',fallbacks:false},
+    {value:'claude-sonnet-5-5',label:'Claude Sonnet 5.5',input:2,output:10,cacheRead:0.10,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true},
+    {value:'claude-opus-5-5',label:'Claude Opus 5.5',input:4,output:20,cacheRead:0.20,webSearchTool:'web_search_20260209',webFetchTool:'web_fetch_20260209',fallbacks:true}
   ].map(Object.freeze));
   const CLAUDE_EFFORTS = Object.freeze(['low','medium','high']);
   const CLAUDE_WEB_SEARCH_USD = 0.01;
@@ -280,7 +280,7 @@
   // central claim. Providers strip it before any surface displays the answer.
   const VERDICTS=Object.freeze(['accurate','inaccurate','mixed','unproven','none']);
   // Canonical display order of the parts a check could not cover.
-  const CHECK_GAPS=Object.freeze(['text','media','video','search']);
+  const CHECK_GAPS=Object.freeze(['text','media','video','links','search']);
   const VERDICT_ALIASES=Object.freeze({ACCURATE:'accurate',TRUE:'accurate',INACCURATE:'inaccurate',FALSE:'inaccurate',
     MIXED:'mixed',MISLEADING:'mixed',PARTLY_TRUE:'mixed',UNPROVEN:'unproven',UNVERIFIABLE:'unproven',INSUFFICIENT:'unproven',
     INSUFFICIENT_EVIDENCE:'unproven',NONE:'none',NO_CLAIM:'none',NOCLAIM:'none'});
@@ -304,8 +304,8 @@
   }
   function formatVerdictLine(verdict,limits=[]) {
     if(!VERDICTS.includes(verdict))return '';
-    // Search is never a model limit: the extension observes it directly.
-    const listed=CHECK_GAPS.filter(gap=>gap!=='search'&&limits.includes(gap));
+    // Search and links are never model limits: the extension observes them.
+    const listed=CHECK_GAPS.filter(gap=>!['links','search'].includes(gap)&&limits.includes(gap));
     return 'VERDICT: '+verdict.toUpperCase()+(listed.length?'; LIMITS: '+listed.join(',').toUpperCase():'');
   }
   // Until the provider registry lands, this is the single place that knows
@@ -313,15 +313,17 @@
   function providerCanSearchX(settings) {return settings?.provider!=='claude'&&settings?.xSearch===true;}
   // Gaps come mostly from facts the extension already knows. The model's own
   // LIMITS can add to them but never remove one. A draft is read in full, so
-  // its only gaps are unsent attachments and a missing search.
-  function checkGaps({post,settings,searched,limits=[],verdict}) {
+  // its only gaps are unsent attachments and a missing search. `webFetch` is
+  // reported only by connections that can open the post's links (Claude).
+  function checkGaps({post,settings,searched,webFetch,limits=[],verdict}) {
     const draft=post?.kind==='draft',gaps=new Set(draft?[]:limits),canFetchX=providerCanSearchX(settings);
     const images=Array.isArray(post?.images)?post.images:[];
     if(!draft&&post?.textTruncated===true&&!canFetchX)gaps.add('text');
     if(draft?post.hasUncheckedMedia===true:images.some(image=>image?.kind!=='video-thumbnail'&&!imageInputURL(image?.url))||
         post?.hasMedia===true&&post.hasVideo!==true&&!images.length)gaps.add('media');
     if(!draft&&post?.hasVideo===true&&!canFetchX)gaps.add('video');
-    // A post with no checkable claim had nothing to search for.
+    // A post with no checkable claim had nothing to search for or open.
+    if(webFetch&&!(webFetch.succeeded>0)&&fetchableLinks(post).length&&verdict!=='none')gaps.add('links');
     if(searched!==true&&verdict!=='none')gaps.add('search');
     return CHECK_GAPS.filter(gap=>gaps.has(gap));
   }
@@ -773,7 +775,7 @@
     // Only the checked post's own truncation matters; postFingerprint ignores
     // the flag because expanding the post changes its text anyway.
     if (DOM?.mainTextTruncated(article)) post.textTruncated = true;
-    if (DOM?.isModern(article)) return {...post, quotedContext:DOM.quoteRoots(article).map(scope => extractPostContext(scope, 1)).filter(Boolean), isPromoted:isPromoted(article)};
+    if (DOM?.isModern(article)) return {...post, quotedContext:DOM.quoteRoots(article).map(scope => extractPostContext(scope, 1)).filter(Boolean), isPromoted:isPromoted(article), ...postReferences(article)};
     const roots = new Set(), visibility = new WeakMap();
     for (const element of all(article, 'a[href], [data-testid="tweetText"], time')) {
       if (!displayed(element, article, visibility) || !outsideComposer(element, article)) continue;
@@ -783,7 +785,73 @@
     // Keep the main post's established identity/language extraction, but use
     // owned scopes for quoted cards so nested media/text stays with its source.
     const quotedContext = Array.from(roots).map(scope => extractPostContext(scope, 1)).filter(Boolean);
-    return { ...post, quotedContext, isPromoted: isPromoted(article) };
+    return { ...post, quotedContext, isPromoted: isPromoted(article), ...postReferences(article) };
+  }
+
+  // Outbound links a post itself carries. Claude cannot read X, so these and
+  // a displayed Community Note are the evidence trail it gets from the page.
+  const MAX_POST_LINKS = 4, MAX_NOTE_LINKS = 2;
+  const X_HOST = /^(?:www\.|mobile\.)?(?:x|twitter)\.com$/i;
+  const NOTE_SELECTOR = '[data-testid="birdwatch-pivot"], [data-testid="birdwatch-note"]';
+  function linkURL(value) {
+    if (typeof value !== 'string' || value.length > 2048) return null;
+    try {
+      const url = new URL(value);
+      if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.port || !url.hostname.includes('.')) return null;
+      url.hash = '';
+      return url.href.length <= 2048 ? url.href : null;
+    } catch (_) { return null; }
+  }
+  function anchorLink(anchor) {
+    let href;
+    try { href = new URL(attribute(anchor, 'href'), 'https://x.com'); } catch (_) { return null; }
+    // Mentions, hashtags and cashtags lead to X profile or search pages.
+    if (X_HOST.test(href.hostname) && !canonicalPostUrl(href.href)) return null;
+    // X shortens the label but keeps the whole address in the anchor's hidden
+    // text. Use it only for X's own shortener; otherwise trust the href.
+    const shown = href.hostname === 't.co' ? String(anchor.textContent || '').replace(/\s+/g, '').replace(/…$/, '') : '';
+    const url = linkURL(shown) || linkURL(href.href);
+    return url ? {href:href.href, url} : null;
+  }
+  function postReferences(article) {
+    const modern = DOM?.isModern(article), visibility = new WeakMap();
+    const own = modern ? node => DOM.owns(node, article) :
+      node => ownedBy(node, article, article) && displayed(node, article, visibility) && outsideComposer(node, article);
+    const bodies = modern ? DOM.bodyNodes(article) : all(article, '[data-testid="tweetText"]').filter(own);
+    // Link cards are quote boundaries, so their contents never join the post's
+    // own text. The modern layout has no card marker yet: best effort only.
+    const cards = modern ? DOM.quoteRoots(article).filter(root => attribute(root, 'data-testid') === 'card.wrapper') :
+      all(article, '[data-testid="card.wrapper"]').filter(own);
+    const found = [];
+    // A body link and its preview card share one t.co address.
+    const add = (link, title = '') => {
+      if (!link) return;
+      let entry = found.find(item => item.href === link.href || item.url === link.url);
+      if (!entry) found.push(entry = {href:link.href, url:link.url});
+      if (title && !entry.title) entry.title = title;
+    };
+    for (const body of bodies) for (const anchor of all(body, 'a[href]').filter(own)) add(anchorLink(anchor));
+    for (const card of cards) {
+      const anchor = all(card, 'a[href]')[0];
+      if (anchor) add(anchorLink(anchor), textOf(card).split('\n').filter(Boolean).slice(0, 3).join(' · ').slice(0, 300));
+    }
+    const links = found.slice(0, MAX_POST_LINKS).map(({href, ...link}) => link);
+    const note = all(article, NOTE_SELECTOR).find(own), noteText = textOf(note).slice(0, 1500);
+    const noteLinks = [...new Set(all(note, 'a[href]').map(anchorLink).filter(Boolean).map(link => link.url))].slice(0, MAX_NOTE_LINKS);
+    return {...(links.length ? {links} : {}),
+      ...(noteText ? {communityNote:{text:noteText, links:noteLinks.map(url => ({url}))}} : {})};
+  }
+  // The pages Claude may open: the post's own links, never X itself.
+  function fetchableLinks(post) {
+    const urls = [...(Array.isArray(post?.links) ? post.links : []), ...(Array.isArray(post?.communityNote?.links) ? post.communityNote.links : [])]
+      .map(link => linkURL(link?.url)).filter(Boolean);
+    return [...new Set(urls)].filter(url => !X_HOST.test(new URL(url).hostname));
+  }
+  // What Claude reads beyond the canonical URL. A newly shown note or link
+  // must not be answered from a check that never saw it.
+  function claudeContextKey(post) {
+    return JSON.stringify([(Array.isArray(post?.links) ? post.links : []).map(link => link?.url || ''),
+      post?.communityNote?.text || '', post?.textTruncated === true]);
   }
 
   // Composer previews can be native buttons and can omit a permalink entirely.
@@ -970,5 +1038,5 @@
     clear() { this.items.clear(); }
   }
 
-  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
+  return Object.freeze({ DOM, Sources, LANGUAGES, API_MODELS, CLAUDE_MODELS, CLAUDE_EFFORTS, CLAUDE_WEB_SEARCH_USD, claudeModelProfile, claudeEffort, claudeCycle, claudeManualOnly, effectiveTriggerSettings, modelProfile, isNonTextGenerationModel, reasoningEffort, buildReasoningEffort, oauthReasoningEffort, providerModel, providerEffort, apiFailureProviderCode, accountLimitReason, AUTO_RETRY_DELAY_MS, AUTO_RETRY_LIMIT, autoRetryDecision, sanitizedRequestDiagnostics, DEFAULT_SETTINGS, DEFAULT_CUSTOM_TRIGGERS, DEFAULT_PROMPTS, MAX_PROMPT_LENGTH, normalizePrompt, readerOutput, VERDICTS, CHECK_GAPS, VERDICT_LINE, verdictOutput, formatVerdictLine, providerCanSearchX, checkGaps, verdictFields, verdictView, verdictRow, explanationMode, triggerMode, normalizeCustomTriggers, postTriggerAllowed, normalizeSettings, resolvePostLanguage, canonicalPostUrl, imageInputURL, linkURL, fetchableLinks, claudeContextKey, extractPost, extractPostContext, postFingerprint, nativePostIdentity, apiPostIdentity, visibilityEligibility, BoundedPostQueue });
 });
