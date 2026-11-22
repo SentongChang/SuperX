@@ -20,6 +20,9 @@ tmp/
 .aws/
 .vscode/
 
+# Private evaluation datasets (see docs/EVAL.md).
+/eval-local/
+
 # Private website, store submission material and local review records.
 /website/
 /chrome-web-store/

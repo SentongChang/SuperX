@@ -30,6 +30,10 @@ Load the `extension/` directory as an unpacked extension to check actual browser
 
 The website is maintained separately and is not part of this repository or source releases. Some internal names retain GrokFirst identifiers for migration compatibility. Renaming a storage key, port or cached identity needs compatibility review rather than a broad textual replacement.
 
+## Evaluating answer quality
+
+`npm run eval` scores the fact check on a small synthetic dataset through the real provider code, with mocked responses and no network. When a change touches prompts, models or answer parsing, also run it live with your own Key and compare the reports. Live runs cost money and never run in CI. See [Evaluating the fact check](docs/EVAL.md) for commands, metrics, cost guidance and the rules for adding items.
+
 ## Change requirements
 
 - Preserve X's left navigation, feed position, post height and theme behavior. Check that the right column does not add horizontal overflow.
